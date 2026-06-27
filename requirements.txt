@@ -1,0 +1,8 @@
+pyspark>=3.5.0
+databricks-sdk
+mlflow>=2.14.0
+fastapi
+uvicorn
+streamlit
+pytest
+Faker

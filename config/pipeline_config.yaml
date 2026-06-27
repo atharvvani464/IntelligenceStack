@@ -1,0 +1,14 @@
+pipeline:
+  name: "lakehouse_telemetry_ingestion"
+  target_catalog: "enterprise_analytics_prod"
+  target_schema: "agentic_core"
+  storage_landing_zone: "/mnt/telemetry/raw_logs"
+  compute:
+    node_type: "i3.xlarge"
+    autoscale:
+      min_workers: 2
+      max_workers: 8
+  delta_properties:
+    delta.enableDeletionVectors: "true"
+    delta.compatibility.writerVersion: "7"
+    delta.compatibility.readerVersion: "3"
