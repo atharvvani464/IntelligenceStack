@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend-api",
+      "runtimeExecutable": "venv/bin/python",
+      "runtimeArgs": ["-m", "uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "control-plane-ui",
+      "runtimeExecutable": "venv/bin/python",
+      "runtimeArgs": ["-m", "streamlit", "run", "src/api/ui.py", "--server.port", "8501", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}
