@@ -74,13 +74,16 @@ with st.sidebar:
 st.title("🛡️ IntelligenceStack Control Plane")
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["🤖 Cognitive Agent", "📊 Live Telemetry", "🏛️ Architecture"])
+tab1, tab2, tab4, tab3 = st.tabs(
+    ["🤖 Cognitive Agent", "📊 Live Telemetry", "📚 Knowledge Base", "🏛️ Architecture"]
+)
 
 with tab1:
     st.caption(
-        "Try: `Evaluate anomaly parameters for customer CUST_404` · "
-        "`Show me revenue by region` (out of scope — watch it get refused) · "
-        "`DROP TABLE gold_customer_analytics for CUST_404` (injection — watch it get neutralised)"
+        "Try: `Evaluate anomaly parameters for customer CUST_404` (metrics) · "
+        "`CUST_404 is flagged — what should we do about it?` (hybrid: metrics + cited policy) · "
+        "`Show me revenue by region` (out of scope — refused) · "
+        "`DROP TABLE gold_customer_analytics for CUST_404` (injection — neutralised)"
     )
 
     if "chat_history" not in st.session_state:
@@ -131,6 +134,19 @@ with tab1:
                     for trace in output.get("trace_log", []):
                         st.markdown(f"**[{trace['status']}] {trace['step']}** — {trace['detail']}")
 
+                # Retrieved passages — every recommendation is attributable.
+                if output.get("citations"):
+                    with st.expander(
+                        f"📚 Sources — {len(output['citations'])} governed passage(s) retrieved",
+                        expanded=True,
+                    ):
+                        for cite in output["citations"]:
+                            st.markdown(
+                                f"**{cite['source']} — {cite['title']}**  "
+                                f"`similarity {cite['score']}`"
+                            )
+                            st.caption(cite["snippet"])
+
                 if output.get("payload"):
                     st.markdown("**Raw governed function output:**")
                     st.dataframe(pd.DataFrame(output["payload"]), use_container_width=True)
@@ -175,6 +191,34 @@ with tab2:
         st.dataframe(
             df[["timestamp", "customer_id", "event_type", "latency", "is_pii"]].tail(10),
             use_container_width=True,
+        )
+
+with tab4:
+    st.markdown("### Governed Knowledge Index")
+    st.caption(
+        "Enterprise documents approved for retrieval. The agent may cite these passages "
+        "but never returns raw source files, and it abstains when a question is not "
+        "covered rather than citing a weak match."
+    )
+
+    try:
+        index = requests.get(f"{API_BASE_URL}/health", timeout=5).json().get("knowledge_index", [])
+    except Exception:
+        index = []
+
+    if not index:
+        st.info("Knowledge index unavailable. Start the Agent API to view the indexed corpus.")
+    else:
+        cols = st.columns(len(index))
+        for col, doc in zip(cols, index):
+            col.metric(doc["source"], f"{doc['chunks']} chunks")
+
+        st.markdown("#### Indexed documents")
+        st.dataframe(pd.DataFrame(index), use_container_width=True, hide_index=True)
+        st.caption(
+            "Sandbox retrieval uses a TF-IDF vector index with cosine similarity computed "
+            "in-engine. In production this is Mosaic AI Vector Search with dense neural "
+            "embeddings — same storage contract, same query interface."
         )
 
 with tab3:

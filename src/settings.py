@@ -32,6 +32,11 @@ SCHEMA = _CONFIG["target_schema"]
 # that same relative structure under the repository root.
 LANDING_ZONE = REPO_ROOT / _CONFIG["storage_landing_zone"].lstrip("/")
 
+# Corpus of governed enterprise documents exposed to retrieval-augmented
+# answers. Tracked in git (unlike the generated telemetry) so the demo works on
+# a fresh clone.
+KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
+
 # The API base the control plane calls. Overridable so the UI can point at a
 # remote deployment without a code change.
 API_BASE_URL = os.environ.get("INTELLIGENCESTACK_API", "http://localhost:8000")

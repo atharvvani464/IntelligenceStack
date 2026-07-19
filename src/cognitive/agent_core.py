@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import mlflow
 
 from src.governance.policy import available_tool_schemas, enforce
+from src.lakehouse.knowledge_engine import KNOWLEDGE_INDEX, KnowledgeEngine
 from src.lakehouse.local_engine import LakehouseEngine
 from src.settings import CATALOG, SCHEMA
 
@@ -34,6 +35,18 @@ SERVING_ENDPOINT = "databricks-meta-llama-3-1-70b-instruct"
 _CUSTOMER_PATTERN = re.compile(r"\bCUST[_\-\s]?(\d{3})\b", re.IGNORECASE)
 _SQL_TOKENS = re.compile(
     r"\b(select|insert|update|delete|drop|alter|create|truncate|grant|revoke)\b",
+    re.IGNORECASE,
+)
+
+# Signals that the question seeks documented guidance rather than (or in
+# addition to) a metric. Deliberately excludes analytics vocabulary such as
+# "anomaly" or "evaluate" so that a pure metrics question stays a pure metrics
+# question and routes to the analytics function alone.
+_KNOWLEDGE_INTENT = re.compile(
+    r"\b(polic(?:y|ies)|procedure|process|runbook|playbook|handbook|guideline|"
+    r"guidance|remediat\w*|escalat\w*|sla|tier|retention|pii|governance|"
+    r"postmortem|incident|credit|obligation|protocol|recommend\w*|advice)\b"
+    r"|\bwhat should\b|\bhow (?:do|should) we\b|\bwhat do we do\b|\bnext steps?\b",
     re.IGNORECASE,
 )
 
@@ -58,6 +71,7 @@ class AgentResult:
     trace: list[TraceStep] = field(default_factory=list)
     governance: dict = field(default_factory=dict)
     payload: list = field(default_factory=list)
+    citations: list = field(default_factory=list)
     executed: bool = False
     serving_mode: str = "local-deterministic-planner"
 
@@ -67,6 +81,7 @@ class AgentResult:
             "trace": [t.as_dict() for t in self.trace],
             "governance": self.governance,
             "payload": self.payload,
+            "citations": self.citations,
             "executed": self.executed,
             "serving_mode": self.serving_mode,
         }
@@ -92,34 +107,101 @@ class ModelServingClient:
         return "local-deterministic-planner"
 
     def plan(self, user_query: str, tools: list[dict]) -> dict:
-        """Resolve intent into a proposed function call.
+        """Resolve intent into an ordered list of proposed function calls.
 
-        Returns `{"function": name|None, "parameters": {...}, "rationale": str}`.
+        Returns `{"calls": [{"function", "parameters"}, ...], "rationale": str}`.
+        A question may need structured analytics, documented guidance, or --
+        the hybrid case -- both, which is why this returns a list rather than a
+        single call. Each proposed call is checked independently at the
+        governance boundary before anything executes.
         """
         granted = {t["name"] for t in tools}
-        match = _CUSTOMER_PATTERN.search(user_query)
+        customer = _CUSTOMER_PATTERN.search(user_query)
+        wants_guidance = bool(_KNOWLEDGE_INTENT.search(user_query))
 
-        if match and "get_customer_anomaly_score" in granted:
-            target_id = f"CUST_{match.group(1)}"
+        calls: list[dict] = []
+        reasons: list[str] = []
+
+        if customer and "get_customer_anomaly_score" in granted:
+            target_id = f"CUST_{customer.group(1)}"
+            calls.append(
+                {
+                    "function": "get_customer_anomaly_score",
+                    "parameters": {"target_id": target_id},
+                }
+            )
+            reasons.append(
+                f"names customer {target_id}, matched to the anomaly scoring function"
+            )
+
+        if wants_guidance and "search_knowledge_base" in granted:
+            calls.append(
+                {
+                    "function": "search_knowledge_base",
+                    "parameters": {"query": user_query.strip()},
+                }
+            )
+            reasons.append(
+                "seeks documented guidance, matched to the governed knowledge index"
+            )
+
+        if not calls:
             return {
-                "function": "get_customer_anomaly_score",
-                "parameters": {"target_id": target_id},
+                "calls": [],
                 "rationale": (
-                    f"Query names customer {target_id} and requests behavioural "
-                    "assessment; matched to the anomaly scoring function."
+                    "No granted function satisfies this intent. The agent holds "
+                    f"EXECUTE on {sorted(granted)} only."
                 ),
             }
 
-        return {
-            "function": None,
-            "parameters": {},
-            "rationale": (
-                "No granted function satisfies this intent. The agent holds "
-                f"EXECUTE on {sorted(granted)} only."
-            ),
-        }
+        prefix = "Hybrid intent: query " if len(calls) > 1 else "Query "
+        return {"calls": calls, "rationale": prefix + " and ".join(reasons) + "."}
 
-    def synthesise(self, user_query: str, payload: list[dict], context: dict) -> str:
+    def synthesise(
+        self,
+        user_query: str,
+        payload: list[dict],
+        context: dict,
+        citations: list[dict] | None = None,
+        searched_knowledge: bool = False,
+        queried_metric: bool = True,
+    ) -> str:
+        """Ground a natural-language answer in the rows and passages retrieved.
+
+        Every figure comes from the gold layer and every recommendation is
+        attributed to the governed document it came from. When retrieval was
+        attempted but nothing relevant was found, the agent says so rather than
+        citing a weak match.
+        """
+        citations = citations or []
+        metric_part = self._synthesise_metric(payload, context) if queried_metric else ""
+        guidance_part = self._synthesise_guidance(citations, searched_knowledge)
+
+        if metric_part and guidance_part:
+            return f"{metric_part}\n\n{guidance_part}"
+        return metric_part or guidance_part
+
+    @staticmethod
+    def _synthesise_guidance(citations: list[dict], searched: bool) -> str:
+        """Render retrieved passages as attributed guidance."""
+        if not searched:
+            return ""
+        if not citations:
+            return (
+                "**No governed knowledge covers that question.** The retrieval index "
+                "was searched and returned no passage with sufficient coverage of the "
+                "question's terms, so no guidance is offered rather than citing a weak "
+                "match."
+            )
+
+        lines = ["**Governed guidance:**"]
+        for hit in citations[:2]:
+            lines.append(f"- *{hit['source']} — {hit['title']}*: {hit['snippet']}")
+        sources = ", ".join(dict.fromkeys(f"[{h['source']}]" for h in citations))
+        lines.append(f"\nSources: {sources}")
+        return "\n".join(lines)
+
+    def _synthesise_metric(self, payload: list[dict], context: dict) -> str:
         """Ground a natural-language answer in the returned rows."""
         if not payload:
             return (
@@ -153,9 +235,14 @@ class ModelServingClient:
 class MosaicAnalyticsAgent:
     """Orchestrates the governed cognitive loop over the lakehouse."""
 
-    def __init__(self, engine: LakehouseEngine | None = None):
+    def __init__(
+        self,
+        engine: LakehouseEngine | None = None,
+        knowledge: KnowledgeEngine | None = None,
+    ):
         self.serving = ModelServingClient()
         self.engine = engine or LakehouseEngine()
+        self.knowledge = knowledge or KnowledgeEngine()
         self.catalog = CATALOG
         self.schema = SCHEMA
 
@@ -167,13 +254,12 @@ class MosaicAnalyticsAgent:
         # ---- Stage 1: intent resolution ------------------------------- #
         with mlflow.start_span(name="llm_intent_classification") as span:
             plan = self.serving.plan(user_query, tools)
-            span.set_attribute("proposed_function", plan["function"])
-            span.set_attribute("proposed_parameters", json.dumps(plan["parameters"]))
+            span.set_attribute("proposed_calls", json.dumps(plan["calls"]))
 
         result.trace.append(
             TraceStep(
                 step="Intent Resolution",
-                status="Success" if plan["function"] else "No Match",
+                status="Success" if plan["calls"] else "No Match",
                 detail=plan["rationale"],
             )
         )
@@ -193,23 +279,27 @@ class MosaicAnalyticsAgent:
                 )
             )
 
-        # ---- Stage 2: governance boundary ----------------------------- #
-        decision = enforce(plan["function"], plan["parameters"])
-        result.governance = decision.as_dict()
-        result.trace.append(
-            TraceStep(
-                step="Governance Boundary Check",
-                status="Granted" if decision.allowed else "Denied",
-                detail=decision.detail,
-            )
-        )
+        # ---- Stages 2 & 3: per-call governance, then governed execution -- #
+        # Each proposed call clears the boundary on its own merits. A single
+        # denial fails the whole request closed: nothing already retrieved is
+        # returned alongside a refusal.
+        fleet: dict = {}
+        queried_metric = False
+        searched_knowledge = False
 
-        if not decision.allowed:
-            result.answer = (
-                "This request was refused at the governance boundary.\n\n"
-                f"**Control:** `{decision.control}`\n\n"
-                f"**Reason:** {decision.detail}"
+        if not plan["calls"]:
+            # No proposed call still passes through the boundary, so a refusal
+            # is produced by the same control that governs every other request.
+            decision = enforce(None, {})
+            result.governance = decision.as_dict()
+            result.trace.append(
+                TraceStep(
+                    step="Governance Boundary Check",
+                    status="Denied",
+                    detail=decision.detail,
+                )
             )
+            result.answer = self._refusal(decision)
             result.trace.append(
                 TraceStep(
                     step="Execution",
@@ -219,40 +309,97 @@ class MosaicAnalyticsAgent:
             )
             return result
 
-        # ---- Stage 3: governed execution ------------------------------ #
-        target_id = decision.parameters["target_id"]
-        with mlflow.start_span(name="execute_lakehouse_tool") as tool_span:
-            payload = self.engine.get_customer_anomaly_score(target_id)
-            fleet = self.engine.fleet_summary()
-            tool_span.set_attribute("resolved_target_id", target_id)
-            tool_span.set_attribute("lakehouse_payload_size", len(payload))
-
-        result.payload = payload
-        result.executed = True
-        result.trace.append(
-            TraceStep(
-                step="Lakehouse Execution",
-                status="Completed",
-                detail=(
-                    f"Invoked {self.catalog}.{self.schema}.get_customer_anomaly_score "
-                    f"with bound parameter target_id={target_id!r}. "
-                    f"Returned {len(payload)} row(s) from the gold layer."
-                ),
+        for call in plan["calls"]:
+            decision = enforce(call["function"], call["parameters"])
+            result.governance = decision.as_dict()
+            result.trace.append(
+                TraceStep(
+                    step="Governance Boundary Check",
+                    status="Granted" if decision.allowed else "Denied",
+                    detail=f"{call['function']}: {decision.detail}",
+                )
             )
-        )
+
+            if not decision.allowed:
+                result.answer = self._refusal(decision)
+                result.payload, result.citations, result.executed = [], [], False
+                result.trace.append(
+                    TraceStep(
+                        step="Execution",
+                        status="Blocked",
+                        detail="No statement was submitted to the lakehouse.",
+                    )
+                )
+                return result
+
+            if call["function"] == "get_customer_anomaly_score":
+                target_id = decision.parameters["target_id"]
+                with mlflow.start_span(name="execute_lakehouse_tool") as tool_span:
+                    result.payload = self.engine.get_customer_anomaly_score(target_id)
+                    fleet = self.engine.fleet_summary()
+                    tool_span.set_attribute("resolved_target_id", target_id)
+                    tool_span.set_attribute("lakehouse_payload_size", len(result.payload))
+                queried_metric = True
+                result.trace.append(
+                    TraceStep(
+                        step="Lakehouse Execution",
+                        status="Completed",
+                        detail=(
+                            f"Invoked {self.catalog}.{self.schema}.get_customer_anomaly_score "
+                            f"with bound parameter target_id={target_id!r}. "
+                            f"Returned {len(result.payload)} row(s) from the gold layer."
+                        ),
+                    )
+                )
+
+            elif call["function"] == "search_knowledge_base":
+                query = decision.parameters["query"]
+                with mlflow.start_span(name="execute_vector_search") as vs_span:
+                    result.citations = self.knowledge.search(query)
+                    vs_span.set_attribute("retrieved_passages", len(result.citations))
+                searched_knowledge = True
+                result.trace.append(
+                    TraceStep(
+                        step="Vector Search Execution",
+                        status="Completed" if result.citations else "No Coverage",
+                        detail=(
+                            f"Queried {KNOWLEDGE_INDEX} with the question as a bound "
+                            f"value. Retrieved {len(result.citations)} governed "
+                            "passage(s) above the coverage threshold."
+                        ),
+                    )
+                )
+
+            result.executed = True
 
         # ---- Stage 4: grounded synthesis ------------------------------ #
         with mlflow.start_span(name="final_insight_synthesis"):
-            result.answer = self.serving.synthesise(user_query, payload, fleet)
+            result.answer = self.serving.synthesise(
+                user_query,
+                result.payload,
+                fleet,
+                citations=result.citations,
+                searched_knowledge=searched_knowledge,
+                queried_metric=queried_metric,
+            )
 
         result.trace.append(
             TraceStep(
                 step="Insight Synthesis",
                 status="Completed",
                 detail=(
-                    "Answer composed strictly from the returned rows and the fleet "
-                    "baseline; no figure originates outside the lakehouse."
+                    "Answer composed strictly from the returned rows and retrieved "
+                    "passages; every figure originates in the lakehouse and every "
+                    "recommendation is attributed to a governed document."
                 ),
             )
         )
         return result
+
+    @staticmethod
+    def _refusal(decision) -> str:
+        return (
+            "This request was refused at the governance boundary.\n\n"
+            f"**Control:** `{decision.control}`\n\n"
+            f"**Reason:** {decision.detail}"
+        )
