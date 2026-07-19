@@ -29,20 +29,33 @@ def bootstrap_unity_catalog_layer():
     
     spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.knowledge_volume;")
     
+    # The governed function the agent is granted EXECUTE on. It is a pure
+    # lookup over the gold layer: total events, the count of events exceeding
+    # the population 3-sigma latency threshold, and the resulting risk factor
+    # (percentage of traffic classified anomalous). This mirrors exactly the
+    # logic in src/lakehouse/local_engine.py so the sandbox and a real
+    # workspace return identical numbers for the same data.
     spark.sql(f"""
         CREATE OR REPLACE FUNCTION get_customer_anomaly_score(target_id STRING)
-        RETURNS TABLE(customer_id STRING, total_anomalies BIGINT, risk_factor DOUBLE)
+        RETURNS TABLE(
+            customer_id STRING,
+            total_events BIGINT,
+            total_anomalies BIGINT,
+            mean_latency_ms DOUBLE,
+            risk_factor DOUBLE
+        )
         LANGUAGE SQL
-        READS ACCESS DATA
-        COMMENT 'Computes advanced statistical behavioral anomaly indexes for a target customer ID.'
-        RETURN 
-        SELECT 
+        READS SQL DATA
+        COMMENT 'Computes statistical behavioural anomaly indexes for a target customer ID.'
+        RETURN
+        SELECT
             customer_id,
-            COUNT(CASE WHEN event_count > (mean_latency_ms * 1.5) THEN 1 END) as total_anomalies,
-            ROUND(COALESCE(AVG(mean_latency_ms) * 1.15, 0.0), 4) as risk_factor
+            total_events,
+            total_anomalies,
+            mean_latency_ms,
+            ROUND(100.0 * total_anomalies / NULLIF(total_events, 0), 2) AS risk_factor
         FROM {catalog}.{schema}.gold_customer_analytics
-        WHERE customer_id = target_id
-        GROUP BY customer_id;
+        WHERE customer_id = target_id;
     """)
     
     logger.info("Unity Catalog semantic boundary successfully established and hardened.")

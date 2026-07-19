@@ -1,38 +1,83 @@
+"""FastAPI backend hosting the Lakehouse Agent API.
+
+The endpoint is a thin transport layer over the agent. Every field it returns —
+the answer, the trace, the governance decision — originates from the agent's
+actual execution, so what the control plane renders is a faithful record rather
+than a scripted narrative.
+"""
+
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
 from src.cognitive.agent_core import MosaicAnalyticsAgent
 
-app = FastAPI(title="Lakehouse Agentic Matrix Hub")
 agent_engine = MosaicAnalyticsAgent()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Materialise the medallion layers once at startup so the first request is
+    # not penalised by the build, and surface any data problem immediately.
+    agent_engine.engine.build()
+    yield
+
+
+app = FastAPI(title="IntelligenceStack Lakehouse Agent API", lifespan=lifespan)
+
 
 class AnalyticsRequest(BaseModel):
     prompt: str
 
+
+class TraceEntry(BaseModel):
+    step: str
+    status: str
+    detail: str
+
+
 class AnalyticsResponse(BaseModel):
     status: str
-    data: str
-    governance_metadata: str
-    trace_log: list
+    answer: str
+    executed: bool
+    serving_mode: str
+    governance: dict
+    payload: list
+    trace_log: list[TraceEntry]
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "healthy", "lakehouse": agent_engine.engine.fleet_summary()}
+
 
 @app.post("/api/v1/agent/explore", response_model=AnalyticsResponse)
-async def explore_lakehouse_metrics(payload: AnalyticsRequest):
+async def explore_lakehouse_metrics(payload: AnalyticsRequest) -> AnalyticsResponse:
     try:
         result = agent_engine.run(user_query=payload.prompt)
-        trace = [
-            {"step": "Intent Parsing", "status": "Success", "detail": "Identified 'get_customer_anomaly_score' tool requirement based on Llama-3 instruction set."},
-            {"step": "Governance Boundary Check", "status": "Verified", "detail": "Unity Catalog function execution granted for target CUST_404."},
-            {"step": "Delta Table Execution", "status": "Completed", "detail": "Executed parameterized SQL over Liquid Clustered Golden layer. Payload mapped."},
-            {"step": "Insight Synthesis", "status": "Completed", "detail": "Mosaic AI endpoint formulated final structural analysis."}
-        ]
-        return AnalyticsResponse(
-            status="SUCCESS",
-            data=result,
-            governance_metadata="Context bound securely via Unity Catalog Function Verification Enclave.",
-            trace_log=trace
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Core Execution Engine Fault: {str(e)}")
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller verbatim
+        raise HTTPException(status_code=500, detail=f"Core execution engine fault: {exc}")
+
+    if result.executed:
+        status = "SUCCESS"
+    elif not result.governance.get("allowed", True):
+        status = "REFUSED"
+    else:
+        status = "NO_ACTION"
+
+    return AnalyticsResponse(
+        status=status,
+        answer=result.answer,
+        executed=result.executed,
+        serving_mode=result.serving_mode,
+        governance=result.governance,
+        payload=result.payload,
+        trace_log=[TraceEntry(**step.as_dict()) for step in result.trace],
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
