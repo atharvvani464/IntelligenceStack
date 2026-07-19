@@ -29,17 +29,42 @@ from src.settings import CATALOG, SCHEMA
 
 @dataclass(frozen=True)
 class ParameterSpec:
-    """Declared contract for a single function argument."""
+    """Declared contract for a single function argument.
+
+    Two kinds of argument exist, and they are governed differently:
+
+    * **Identifiers** (the default) are strict tokens such as ``CUST_404``. They
+      must match `pattern` exactly and are subject to full SQL interdiction.
+    * **Free text** (`free_text=True`) is a natural-language value, such as a
+      retrieval question. A question legitimately contains words like "update"
+      or "create", so keyword-level SQL interdiction would reject valid input.
+      Free text is instead bounded by length and screened for SQL *control
+      sequences*; it is only ever used as a bound value (never composed into a
+      statement), so it cannot influence query structure.
+    """
 
     name: str
     pattern: str
     description: str
     required: bool = True
+    free_text: bool = False
+    max_length: int = 500
 
     def validate(self, value) -> str | None:
         """Return an error string if `value` violates the contract."""
         if not isinstance(value, str):
             return f"parameter '{self.name}' must be a string, received {type(value).__name__}"
+
+        if self.free_text:
+            if not value.strip():
+                return f"parameter '{self.name}' must not be empty"
+            if len(value) > self.max_length:
+                return (
+                    f"parameter '{self.name}' exceeds the declared maximum length of "
+                    f"{self.max_length} characters"
+                )
+            return None
+
         if not re.fullmatch(self.pattern, value):
             return (
                 f"parameter '{self.name}' value {value!r} does not satisfy the "
@@ -92,15 +117,37 @@ REGISTERED_FUNCTIONS: dict[str, FunctionSpec] = {
                 description="Customer identifier in the form CUST_123.",
             )
         ],
-    )
+    ),
+    "search_knowledge_base": FunctionSpec(
+        name="search_knowledge_base",
+        description=(
+            "Retrieves relevant passages from the governed enterprise document "
+            "corpus (runbooks, playbooks, and policies) for a natural-language "
+            "question. Returns cited excerpts, never raw source files."
+        ),
+        parameters=[
+            ParameterSpec(
+                name="query",
+                pattern=r".+",
+                description="Natural-language question to retrieve governed passages for.",
+                free_text=True,
+            )
+        ],
+    ),
 }
 
-# Tokens that indicate an attempt to express SQL rather than supply a value.
-_SQL_TOKENS = re.compile(
+# Keywords that indicate an attempt to express SQL rather than supply a value.
+# Applied to identifier parameters only -- a natural-language question may
+# legitimately contain words like "update" or "create".
+_SQL_KEYWORDS = re.compile(
     r"\b(select|insert|update|delete|drop|alter|create|truncate|grant|revoke|"
-    r"union|exec|execute)\b|--|;|/\*",
+    r"union|exec|execute)\b",
     re.IGNORECASE,
 )
+
+# Control sequences used to terminate or comment out a statement. These have no
+# legitimate place in *any* parameter value and are rejected everywhere.
+_SQL_CONTROL = re.compile(r"--|;|/\*")
 
 
 @dataclass(frozen=True)
@@ -142,21 +189,35 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
         )
 
     spec = REGISTERED_FUNCTIONS[function_name]
+    declared = {p.name: p for p in spec.parameters}
 
-    # Control 3 (applied early) -- SQL interdiction on every supplied value.
+    # Control 3 (applied early) -- SQL interdiction, scoped to the parameter's
+    # declared kind. Control sequences are rejected in every value; the keyword
+    # filter applies only to identifiers, since free-text questions may
+    # legitimately contain words such as "update" or "create". Undeclared
+    # parameters are screened strictly and rejected outright below.
     for key, value in parameters.items():
-        if isinstance(value, str) and _SQL_TOKENS.search(value):
-            return GovernanceDecision(
-                allowed=False,
-                control="SQL_INTERDICTION",
-                detail=(
-                    f"Parameter '{key}' contains SQL control tokens. The agent is "
-                    "not permitted to express SQL; it may only supply values to "
-                    "pre-approved functions."
-                ),
-                function=function_name,
-                parameters=parameters,
-            )
+        if not isinstance(value, str):
+            continue
+
+        param = declared.get(key)
+        if _SQL_CONTROL.search(value):
+            offence = "SQL control sequences"
+        elif (param is None or not param.free_text) and _SQL_KEYWORDS.search(value):
+            offence = "SQL keywords"
+        else:
+            continue
+
+        return GovernanceDecision(
+            allowed=False,
+            control="SQL_INTERDICTION",
+            detail=(
+                f"Parameter '{key}' contains {offence}. The agent is not permitted "
+                "to express SQL; it may only supply values to pre-approved functions."
+            ),
+            function=function_name,
+            parameters=parameters,
+        )
 
     # Control 2 -- parameter schema conformance.
     for param in spec.parameters:

@@ -18,9 +18,11 @@ agent_engine = MosaicAnalyticsAgent()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Materialise the medallion layers once at startup so the first request is
-    # not penalised by the build, and surface any data problem immediately.
+    # Materialise the medallion layers and the vector index once at startup so
+    # the first request is not penalised by the build, and any data or corpus
+    # problem surfaces immediately rather than mid-demo.
     agent_engine.engine.build()
+    agent_engine.knowledge.build()
     yield
 
 
@@ -44,12 +46,17 @@ class AnalyticsResponse(BaseModel):
     serving_mode: str
     governance: dict
     payload: list
+    citations: list
     trace_log: list[TraceEntry]
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "healthy", "lakehouse": agent_engine.engine.fleet_summary()}
+    return {
+        "status": "healthy",
+        "lakehouse": agent_engine.engine.fleet_summary(),
+        "knowledge_index": agent_engine.knowledge.index_summary(),
+    }
 
 
 @app.post("/api/v1/agent/explore", response_model=AnalyticsResponse)
@@ -73,6 +80,7 @@ async def explore_lakehouse_metrics(payload: AnalyticsRequest) -> AnalyticsRespo
         serving_mode=result.serving_mode,
         governance=result.governance,
         payload=result.payload,
+        citations=result.citations,
         trace_log=[TraceEntry(**step.as_dict()) for step in result.trace],
     )
 
