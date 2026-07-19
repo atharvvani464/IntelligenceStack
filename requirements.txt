@@ -1,8 +1,17 @@
-pyspark>=3.5.0
-databricks-sdk
-mlflow>=2.14.0
+# Core sandbox runtime
+duckdb>=1.0.0
+pandas>=2.0.0
+pyyaml
 fastapi
 uvicorn
 streamlit
-pytest
+requests
 Faker
+mlflow>=2.14.0
+pytest
+
+# Reference-architecture dependencies (used by the DLT / Unity Catalog / Vector
+# Search modules that target a real Databricks workspace). Not required to run
+# the local sandbox, but declared so the reference code installs cleanly.
+pyspark>=3.5.0
+databricks-sdk

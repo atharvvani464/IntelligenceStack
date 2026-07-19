@@ -1,5 +1,15 @@
 import dlt
-from pyspark.sql.functions import col, to_date, current_timestamp, when, sha2
+from pyspark.sql.functions import (
+    avg,
+    col,
+    count,
+    current_timestamp,
+    sha2,
+    stddev,
+    to_date,
+    when,
+)
+from pyspark.sql.functions import sum as spark_sum
 
 # Reference configuration mappings natively
 source_dir = "/mnt/telemetry/raw_logs"
@@ -31,21 +41,36 @@ def bronze_telemetry_raw():
 def silver_telemetry_cleaned():
     return (
         dlt.read_stream("bronze_telemetry_raw")
+        .withColumn("event_time", col("timestamp").cast("timestamp"))
         .withColumn("timestamp_date", to_date(col("timestamp")))
         .withColumn("ingest_time", current_timestamp())
-        .withColumn("masked_payload", when(col("context.pii") == True, sha2(col("payload"), 256)).otherwise(col("payload")))
+        .withColumn("latency_ms", col("context.latency").cast("double"))
+        .withColumn("is_pii", col("context.pii").cast("boolean"))
+        .withColumn(
+            "masked_payload",
+            when(col("context.pii") == True, sha2(col("payload"), 256)).otherwise(col("payload")),  # noqa: E712
+        )
     )
 
 @dlt.table(
     name="gold_customer_analytics",
-    comment="Materialized Golden Layer tailored for agentic feature scaling and immediate lookup queries."
+    comment="Materialized Golden Layer at per-customer grain, tailored for agentic lookup queries."
 )
 def gold_customer_analytics():
+    # Population 3-sigma latency threshold, computed once and broadcast, so the
+    # governed function stays a pure per-customer lookup. This is the same
+    # anomaly definition implemented in src/lakehouse/local_engine.py.
+    silver = dlt.read("silver_telemetry_cleaned")
+    stats = silver.agg(
+        avg("latency_ms").alias("pop_mean"),
+        stddev("latency_ms").alias("pop_stddev"),
+    ).collect()[0]
+    threshold = (stats["pop_mean"] or 0.0) + 3.0 * (stats["pop_stddev"] or 0.0)
+
     return (
-        dlt.read("silver_telemetry_cleaned")
-        .groupBy("customer_id", "timestamp_date", "event_type")
-        .agg(
-            count("masked_payload").alias("event_count"),
-            avg(col("context.latency")).alias("mean_latency_ms")
+        silver.groupBy("customer_id").agg(
+            count("*").alias("total_events"),
+            spark_sum(when(col("latency_ms") > threshold, 1).otherwise(0)).alias("total_anomalies"),
+            avg("latency_ms").alias("mean_latency_ms"),
         )
     )
