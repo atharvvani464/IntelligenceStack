@@ -103,10 +103,37 @@ def test_natural_language_is_not_blocked_by_keyword_interdiction(query):
     assert decision.allowed, f"{query!r} should be granted: {decision.detail}"
 
 
-def test_control_sequences_still_blocked_in_free_text():
-    decision = enforce("search_knowledge_base", {"query": "policy'; DROP TABLE x; --"})
+@pytest.mark.parametrize(
+    "query",
+    [
+        "policy'; DROP TABLE x; --",
+        "'; SELECT * FROM knowledge_base_vector_index --",
+        "runbook'; DELETE FROM gold_customer_analytics; --",
+    ],
+)
+def test_injection_attempts_blocked_in_free_text(query):
+    """Control sequences *combined with* SQL vocabulary are refused."""
+    decision = enforce("search_knowledge_base", {"query": query})
     assert not decision.allowed
     assert decision.control == "SQL_INTERDICTION"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "CUST_404 is flagged; what should we do?",  # semicolon in ordinary prose
+        "What is our escalation policy -- the latest version?",  # double hyphen as dash
+        "Which tier gets same-hour response; Platinum or Gold?",
+    ],
+)
+def test_prose_punctuation_is_not_treated_as_injection(query):
+    """A bound value cannot express SQL, so punctuation alone must not refuse.
+
+    Regression guard: these are natural phrasings a presenter would type, and
+    refusing them mid-demo looks like a defect rather than a control.
+    """
+    decision = enforce("search_knowledge_base", {"query": query})
+    assert decision.allowed, f"{query!r} should be granted: {decision.detail}"
 
 
 def test_identifier_parameter_keeps_strict_interdiction():

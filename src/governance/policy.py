@@ -36,11 +36,13 @@ class ParameterSpec:
     * **Identifiers** (the default) are strict tokens such as ``CUST_404``. They
       must match `pattern` exactly and are subject to full SQL interdiction.
     * **Free text** (`free_text=True`) is a natural-language value, such as a
-      retrieval question. A question legitimately contains words like "update"
-      or "create", so keyword-level SQL interdiction would reject valid input.
-      Free text is instead bounded by length and screened for SQL *control
-      sequences*; it is only ever used as a bound value (never composed into a
-      statement), so it cannot influence query structure.
+      retrieval question. Prose legitimately contains words like "update" or
+      "create" and punctuation like ``;`` or ``--``, so strict interdiction
+      would reject valid input. Free text is instead bounded by length and
+      refused only when control sequences appear *together with* SQL
+      vocabulary -- the signature of an injection attempt. This is safe because
+      the value is only ever used as a bound value, never composed into a
+      statement, so it cannot influence query structure.
     """
 
     name: str
@@ -192,18 +194,36 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
     declared = {p.name: p for p in spec.parameters}
 
     # Control 3 (applied early) -- SQL interdiction, scoped to the parameter's
-    # declared kind. Control sequences are rejected in every value; the keyword
-    # filter applies only to identifiers, since free-text questions may
-    # legitimately contain words such as "update" or "create". Undeclared
-    # parameters are screened strictly and rejected outright below.
+    # declared kind.
+    #
+    # Identifiers are strict: any SQL keyword or control sequence is refused.
+    #
+    # Free text is screened differently, because a natural-language question is
+    # only ever used as a *bound* value and is never composed into a statement.
+    # Punctuation alone therefore cannot express SQL, and prose legitimately
+    # contains it -- "CUST_404 is flagged; what should we do?" and "the policy
+    # -- the latest one" are ordinary questions, not attacks. What does signal
+    # an injection attempt is a control sequence *combined with* SQL
+    # vocabulary, as in "policy'; DROP TABLE knowledge; --". That combination
+    # is refused and recorded; bare punctuation is not.
+    #
+    # Undeclared parameters are screened strictly and rejected outright below.
     for key, value in parameters.items():
         if not isinstance(value, str):
             continue
 
         param = declared.get(key)
-        if _SQL_CONTROL.search(value):
+        has_control = bool(_SQL_CONTROL.search(value))
+        has_keyword = bool(_SQL_KEYWORDS.search(value))
+
+        if param is not None and param.free_text:
+            if has_control and has_keyword:
+                offence = "SQL control sequences combined with SQL keywords"
+            else:
+                continue
+        elif has_control:
             offence = "SQL control sequences"
-        elif (param is None or not param.free_text) and _SQL_KEYWORDS.search(value):
+        elif has_keyword:
             offence = "SQL keywords"
         else:
             continue

@@ -209,9 +209,12 @@ with tab4:
     if not index:
         st.info("Knowledge index unavailable. Start the Agent API to view the indexed corpus.")
     else:
-        cols = st.columns(len(index))
-        for col, doc in zip(cols, index):
-            col.metric(doc["source"], f"{doc['chunks']} chunks")
+        # Summary metrics rather than one card per document: document names are
+        # long enough to truncate in a narrow column, and the table below
+        # already carries the per-document detail.
+        col1, col2 = st.columns(2)
+        col1.metric("Governed documents", len(index))
+        col2.metric("Indexed passages", sum(d["chunks"] for d in index))
 
         st.markdown("#### Indexed documents")
         st.dataframe(pd.DataFrame(index), use_container_width=True, hide_index=True)

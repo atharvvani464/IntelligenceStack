@@ -97,6 +97,8 @@ Generate a fixed, reproducible demo dataset (the anomaly cohort is baked in):
 ```bash
 PYTHONPATH=. python src/ingestion/synthetic_generator.py --seed-batch 120
 ```
+This is **deterministic** — a fixed seed means you get exactly 3,000 events and the same anomaly figures quoted throughout this README and the executive deck (CUST_404 at ~82% anomalous, ~6× the fleet baseline). Every number in the demo is reproducible on your machine.
+
 > For a live-streaming demo instead, run it with no arguments and it will write a new batch every second.
 
 ### 3. Launch the backend API

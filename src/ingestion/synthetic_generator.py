@@ -82,8 +82,14 @@ def write_batch(events: list[dict], batch_num: int) -> str:
     return str(filename)
 
 
-def seed_dataset(num_batches: int, batch_size: int = 20, seed: int = 42) -> None:
-    """Generate a fixed, reproducible dataset spread over a recent time window."""
+def seed_dataset(num_batches: int, batch_size: int = 25, seed: int = 42) -> None:
+    """Generate a fixed, reproducible dataset spread over a recent time window.
+
+    Deterministic by design: the seed is fixed, so `--seed-batch 120` always
+    produces the same 3,000 events and therefore the same anomaly figures
+    quoted in the README, the executive deck, and the demo runbook. Anyone who
+    clones the repository can reproduce those numbers exactly.
+    """
     random.seed(seed)
     Faker.seed(seed)
     setup_directory()
@@ -124,7 +130,7 @@ if __name__ == "__main__":
         metavar="N",
         help="Generate N reproducible batches and exit (for a fixed demo dataset).",
     )
-    parser.add_argument("--batch-size", type=int, default=20, help="Events per batch.")
+    parser.add_argument("--batch-size", type=int, default=25, help="Events per batch.")
     args = parser.parse_args()
 
     if args.seed_batch:
