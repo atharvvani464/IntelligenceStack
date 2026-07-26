@@ -1,3 +1,16 @@
+"""Provisions the Mosaic AI Vector Search index in a real Databricks workspace.
+
+This is the *production* counterpart to `src/lakehouse/knowledge_engine.py`,
+which serves the same retrieval contract locally so the sandbox is demonstrable
+without a workspace — the same split as `governance/uc_bootstrap.py` (production)
+and `lakehouse/local_engine.py` (sandbox).
+
+The seam is narrow: the sandbox embeds passages with TF-IDF and ranks them with
+DuckDB's native cosine similarity; here the same passages are embedded with
+`databricks-bge-large-en` and served by a managed vector index. Storage layout
+and query contract are unchanged.
+"""
+
 try:
     from databricks.vector_search.client import VectorSearchClient
 except ModuleNotFoundError:
