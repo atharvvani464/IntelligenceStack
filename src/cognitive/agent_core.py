@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 import mlflow
 
+from src.governance.audit import AuditRecord, AuditTrail, new_request_id
 from src.governance.policy import available_tool_schemas, enforce
 from src.lakehouse.knowledge_engine import KNOWLEDGE_INDEX, KnowledgeEngine
 from src.lakehouse.local_engine import LakehouseEngine
@@ -74,6 +75,8 @@ class AgentResult:
     citations: list = field(default_factory=list)
     executed: bool = False
     serving_mode: str = "local-deterministic-planner"
+    # Correlates this response with its rows in the durable audit trail.
+    request_id: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -84,6 +87,7 @@ class AgentResult:
             "citations": self.citations,
             "executed": self.executed,
             "serving_mode": self.serving_mode,
+            "request_id": self.request_id,
         }
 
 
@@ -239,17 +243,41 @@ class MosaicAnalyticsAgent:
         self,
         engine: LakehouseEngine | None = None,
         knowledge: KnowledgeEngine | None = None,
+        audit: AuditTrail | None = None,
     ):
         self.serving = ModelServingClient()
         self.engine = engine or LakehouseEngine()
         self.knowledge = knowledge or KnowledgeEngine()
+        self.audit = audit or AuditTrail()
         self.catalog = CATALOG
         self.schema = SCHEMA
+
+    def _audit(self, request_id: str, prompt: str, decision, **outcome) -> None:
+        """Persist one governance decision as durable evidence.
+
+        Called for grants and denials alike -- a refusal is the control working,
+        and it is precisely what an auditor asks to see.
+        """
+        self.audit.record(
+            AuditRecord(
+                request_id=request_id,
+                prompt=prompt,
+                function=decision.function,
+                allowed=decision.allowed,
+                control=decision.control,
+                detail=decision.detail,
+                parameters=decision.parameters,
+                serving_mode=self.serving.mode,
+                **outcome,
+            )
+        )
 
     @mlflow.trace(name="execute_cognitive_loop")
     def run(self, user_query: str) -> AgentResult:
         tools = available_tool_schemas()
         result = AgentResult(answer="", serving_mode=self.serving.mode)
+        request_id = new_request_id()
+        result.request_id = request_id
 
         # ---- Stage 1: intent resolution ------------------------------- #
         with mlflow.start_span(name="llm_intent_classification") as span:
@@ -307,6 +335,7 @@ class MosaicAnalyticsAgent:
                     detail="No statement was submitted to the lakehouse.",
                 )
             )
+            self._audit(request_id, user_query, decision)
             return result
 
         for call in plan["calls"]:
@@ -330,7 +359,13 @@ class MosaicAnalyticsAgent:
                         detail="No statement was submitted to the lakehouse.",
                     )
                 )
+                self._audit(request_id, user_query, decision)
                 return result
+
+            # What *this* call returned. Tracked per call so each audit record
+            # reports its own outcome rather than the accumulated result.
+            call_rows = 0
+            call_citations = 0
 
             if call["function"] == "get_customer_anomaly_score":
                 target_id = decision.parameters["target_id"]
@@ -340,6 +375,7 @@ class MosaicAnalyticsAgent:
                     tool_span.set_attribute("resolved_target_id", target_id)
                     tool_span.set_attribute("lakehouse_payload_size", len(result.payload))
                 queried_metric = True
+                call_rows = len(result.payload)
                 result.trace.append(
                     TraceStep(
                         step="Lakehouse Execution",
@@ -358,6 +394,7 @@ class MosaicAnalyticsAgent:
                     result.citations = self.knowledge.search(query)
                     vs_span.set_attribute("retrieved_passages", len(result.citations))
                 searched_knowledge = True
+                call_citations = len(result.citations)
                 result.trace.append(
                     TraceStep(
                         step="Vector Search Execution",
@@ -371,6 +408,17 @@ class MosaicAnalyticsAgent:
                 )
 
             result.executed = True
+
+            # Record the granted call together with what it actually returned,
+            # so the trail shows not just what was permitted but what happened.
+            self._audit(
+                request_id,
+                user_query,
+                decision,
+                executed=True,
+                rows_returned=call_rows,
+                citations_returned=call_citations,
+            )
 
         # ---- Stage 4: grounded synthesis ------------------------------ #
         with mlflow.start_span(name="final_insight_synthesis"):
