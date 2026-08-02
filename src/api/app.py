@@ -56,6 +56,8 @@ class AnalyticsResponse(BaseModel):
     trace_log: list[TraceEntry]
     # Correlation id for this request's rows in the durable audit trail.
     request_id: str
+    # Measured end-to-end cost of this request, in milliseconds.
+    duration_ms: float
 
 
 @app.get("/health")
@@ -91,6 +93,7 @@ async def explore_lakehouse_metrics(payload: AnalyticsRequest) -> AnalyticsRespo
         citations=result.citations,
         trace_log=[TraceEntry(**step.as_dict()) for step in result.trace],
         request_id=result.request_id,
+        duration_ms=result.duration_ms,
     )
 
 

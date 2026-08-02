@@ -33,6 +33,8 @@ This is a working system, not a slide deck. Concretely:
 - **SQL is parameter-bound, never interpolated.** The governed function is invoked with bound parameters ([`src/lakehouse/local_engine.py`](src/lakehouse/local_engine.py)). A hostile identifier matches no rows rather than altering the query.
 - **Retrieval is governed too, and it abstains.** `search_knowledge_base` is on the same allowlist, its free-text question is a bound value, and the agent declines to answer rather than cite a weak match (see below).
 - **Every decision is durable evidence.** Grants *and* refusals are appended to a tamper-resistant audit trail ([`src/governance/audit.py`](src/governance/audit.py)) that outlives the request and the process, and is queryable in the Trust Center tab.
+- **The boundary scales to N tools.** One question can trigger several governed calls — a comparison issues one per customer — and each clears the boundary independently, with its own audit record and its own measured cost.
+- **Performance is measured, not claimed.** Every call is timed; p50/p95 latency appears in the Trust Center alongside the decisions.
 
 ## How a question flows through the system
 ```
@@ -64,7 +66,9 @@ Every step is recorded and shown in the UI's *Agent Trace Route* and *Governance
    → The agent calls **two** governed tools: it reports the live anomaly score *and* retrieves the remediation procedure from the governed corpus, citing the SRE Runbook. Each call clears the boundary independently, and both appear in the trace.
 5. **Honest abstention** — `What is our vacation policy?`
    → Retrieval runs but no passage sufficiently covers the question, so the agent says **"no governed knowledge covers that"** rather than citing a weak lexical match.
-6. **Proof, after the fact** — open the **🛡️ Trust Center** tab
+6. **Multi-step reasoning** — `Compare CUST_404 and CUST_417`
+   → The agent issues **one governed call per customer**, each independently cleared at the boundary, then ranks them and says where to send remediation effort first. Ask `Is CUST_404 getting worse over time?` and it routes to a different governed function entirely and describes the trajectory.
+7. **Proof, after the fact** — open the **🛡️ Trust Center** tab
    → Every decision above is already recorded: what was asked, which function was proposed, which control ruled on it, and what it returned. Restart the API and it is all still there. This is the answer to *"show me exactly what the AI did."*
 
 ## Retrieval, and why it abstains
@@ -81,7 +85,7 @@ Cosine score alone is not a safe relevance test on a small corpus — *"what is 
 | Local lakehouse | [`src/lakehouse/local_engine.py`](src/lakehouse/local_engine.py) | Materialises the same medallion topology in DuckDB; serves the governed function. |
 | Knowledge index | [`src/lakehouse/knowledge_engine.py`](src/lakehouse/knowledge_engine.py) | Vector index over the governed document corpus; cosine similarity computed in-engine. |
 | Knowledge corpus | [`knowledge/`](knowledge/) | Enterprise runbooks, playbooks, and policies approved for retrieval. |
-| Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The enforced boundary, plus the Unity Catalog SQL that provisions it in production. |
+| Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The enforced boundary and the allowlist of three governed functions, plus the Unity Catalog SQL that provisions it in production. |
 | Audit trail | [`src/governance/audit.py`](src/governance/audit.py) · [`audit_engine.py`](src/lakehouse/audit_engine.py) | Append-only record of every decision, and the SQL view that makes it queryable. |
 | Agent | [`src/cognitive/agent_core.py`](src/cognitive/agent_core.py) | Intent → governed tool call → grounded synthesis, with a full audit trace. |
 | API | [`src/api/app.py`](src/api/app.py) | FastAPI endpoint over the agent. |
@@ -120,7 +124,7 @@ Open `http://localhost:8501` and run the three-move demo above.
 ```bash
 PYTHONPATH=. pytest -q
 ```
-The suite verifies real computation, governance enforcement, and injection resistance.
+The suite verifies real computation, governance enforcement, injection resistance, retrieval quality and abstention, audit durability, and multi-step chaining. It also runs in CI on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)), including a check that the demo figures quoted above still reproduce exactly.
 
 ## From sandbox to production
 The sandbox is intentionally a faithful stand-in; the seams are explicit and swap cleanly:

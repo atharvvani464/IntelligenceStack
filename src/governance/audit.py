@@ -61,6 +61,10 @@ class AuditRecord:
     rows_returned: int = 0
     citations_returned: int = 0
     serving_mode: str = ""
+    # Wall-clock cost of this governed call, in milliseconds. Recorded so the
+    # question "is this fast enough?" is answered by measurement rather than
+    # assertion -- and so a slow tool can be identified after the fact.
+    duration_ms: float = 0.0
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     recorded_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()

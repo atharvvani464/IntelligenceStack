@@ -157,7 +157,11 @@ with tab1:
                     st.markdown("**Raw governed function output:**")
                     st.dataframe(pd.DataFrame(output["payload"]), use_container_width=True)
 
-                st.caption(f"Model serving mode: `{output['serving_mode']}`")
+                st.caption(
+                    f"Model serving mode: `{output['serving_mode']}` · "
+                    f"answered in **{output['duration_ms']:.0f} ms** · "
+                    f"audit ref `{output['request_id']}`"
+                )
                 st.session_state.chat_history.append({"role": "assistant", "content": output["answer"]})
             elif response is not None:
                 st.error(f"Agent API returned status {response.status_code}: {response.text}")
@@ -264,6 +268,13 @@ with tab5:
             f"Across {s['distinct_requests']:,} request(s) · "
             f"first recorded {s['first_recorded']} · last {s['last_recorded']}"
         )
+
+        # Measured cost, not asserted. Answers "is it fast enough?" from the
+        # same record that answers "what did it do?".
+        l1, l2, l3 = st.columns(3)
+        l1.metric("p50 latency", f"{s['p50_duration_ms']:.0f} ms")
+        l2.metric("p95 latency", f"{s['p95_duration_ms']:.0f} ms")
+        l3.metric("slowest call", f"{s['max_duration_ms']:.0f} ms")
 
         colA, colB = st.columns(2)
         with colA:

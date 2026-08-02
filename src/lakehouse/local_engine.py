@@ -185,6 +185,50 @@ class LakehouseEngine:
             for r in rows
         ]
 
+    def get_customer_timeline(self, target_id: str) -> list[dict]:
+        """Daily anomaly trajectory for one customer.
+
+        The anomaly function answers "how bad is this customer?"; this answers
+        "is it getting worse?". Same governance discipline -- the identifier is
+        a bound parameter, and the threshold is the same population 3-sigma
+        figure the rest of the system uses, so the two functions can never
+        disagree about what counts as anomalous.
+        """
+        self._ensure_built()
+        rows = self._con.execute(
+            f"""
+            WITH baseline AS (
+                SELECT
+                    AVG(latency_ms) + ({ANOMALY_SIGMA} * COALESCE(STDDEV(latency_ms), 0))
+                        AS threshold
+                FROM silver_telemetry_cleaned
+            )
+            SELECT
+                s.timestamp_date,
+                COUNT(*)                                          AS events,
+                COUNT(*) FILTER (WHERE s.latency_ms > b.threshold) AS anomalies,
+                AVG(s.latency_ms)                                  AS mean_latency_ms
+            FROM silver_telemetry_cleaned s
+            CROSS JOIN baseline b
+            WHERE s.customer_id = ?
+            GROUP BY s.timestamp_date
+            ORDER BY s.timestamp_date
+            """,
+            [target_id],
+        ).fetchall()
+
+        return [
+            {
+                "customer_id": target_id,
+                "day": str(r[0]),
+                "events": r[1],
+                "anomalies": r[2],
+                "mean_latency_ms": round(r[3], 2) if r[3] is not None else 0.0,
+                "anomaly_rate": round(100.0 * r[2] / r[1], 2) if r[1] else 0.0,
+            }
+            for r in rows
+        ]
+
     def fleet_summary(self) -> dict:
         """Population-level statistics backing the telemetry dashboard."""
         self._ensure_built()
