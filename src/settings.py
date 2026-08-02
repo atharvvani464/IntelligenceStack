@@ -37,6 +37,12 @@ LANDING_ZONE = REPO_ROOT / _CONFIG["storage_landing_zone"].lstrip("/")
 # a fresh clone.
 KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
 
+# Durable audit trail of agent actions. Lives under the git-ignored mnt/ tree
+# because it is runtime evidence, not source: it accumulates on the machine
+# that ran the agent and may contain the questions users asked.
+AUDIT_DIR = REPO_ROOT / "mnt" / "audit"
+AUDIT_LOG = AUDIT_DIR / "agent_audit.jsonl"
+
 # The API base the control plane calls. Overridable so the UI can point at a
 # remote deployment without a code change.
 API_BASE_URL = os.environ.get("INTELLIGENCESTACK_API", "http://localhost:8000")

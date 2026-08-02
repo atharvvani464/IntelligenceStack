@@ -74,8 +74,14 @@ with st.sidebar:
 st.title("🛡️ IntelligenceStack Control Plane")
 st.markdown("---")
 
-tab1, tab2, tab4, tab3 = st.tabs(
-    ["🤖 Cognitive Agent", "📊 Live Telemetry", "📚 Knowledge Base", "🏛️ Architecture"]
+tab1, tab2, tab4, tab5, tab3 = st.tabs(
+    [
+        "🤖 Cognitive Agent",
+        "📊 Live Telemetry",
+        "📚 Knowledge Base",
+        "🛡️ Trust Center",
+        "🏛️ Architecture",
+    ]
 )
 
 with tab1:
@@ -222,6 +228,75 @@ with tab4:
             "Sandbox retrieval uses a TF-IDF vector index with cosine similarity computed "
             "in-engine. In production this is Mosaic AI Vector Search with dense neural "
             "embeddings — same storage contract, same query interface."
+        )
+
+with tab5:
+    st.markdown("### Governance Trust Center")
+    st.caption(
+        "Every decision the boundary made, persisted to an append-only trail that "
+        "outlives the request and the process. This is the answer to “show me exactly "
+        "what the AI did” — evidence, not assertion."
+    )
+
+    try:
+        audit = requests.get(f"{API_BASE_URL}/api/v1/audit/summary", timeout=8).json()
+        recent = requests.get(
+            f"{API_BASE_URL}/api/v1/audit/recent", params={"limit": 25}, timeout=8
+        ).json()
+    except Exception:
+        audit, recent = None, None
+
+    if not audit:
+        st.info("Audit trail unavailable. Start the Agent API to view recorded decisions.")
+    elif audit["summary"]["total_actions"] == 0:
+        st.info(
+            "No decisions recorded yet. Ask the agent something on the Cognitive Agent "
+            "tab — grants *and* refusals are both recorded here."
+        )
+    else:
+        s = audit["summary"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Governed actions", f"{s['total_actions']:,}")
+        c2.metric("Granted", f"{s['granted']:,}")
+        c3.metric("Denied", f"{s['denied']:,}")
+        c4.metric("Denial rate", f"{s['denial_rate']:.1f}%")
+        st.caption(
+            f"Across {s['distinct_requests']:,} request(s) · "
+            f"first recorded {s['first_recorded']} · last {s['last_recorded']}"
+        )
+
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown("#### Decisions by control")
+            st.dataframe(
+                pd.DataFrame(audit["by_control"]), use_container_width=True, hide_index=True
+            )
+        with colB:
+            st.markdown("#### Invocations by governed function")
+            st.dataframe(
+                pd.DataFrame(audit["by_function"]), use_container_width=True, hide_index=True
+            )
+
+        if audit["top_denied"]:
+            st.markdown("#### Most-refused requests")
+            st.caption("What users attempt that the allowlist does not permit.")
+            st.dataframe(
+                pd.DataFrame(audit["top_denied"]), use_container_width=True, hide_index=True
+            )
+
+        st.markdown("#### Recent decisions")
+        decisions = pd.DataFrame(recent["decisions"]) if recent else pd.DataFrame()
+        if not decisions.empty:
+            st.dataframe(decisions, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Export audit extract (CSV)",
+                decisions.to_csv(index=False).encode(),
+                file_name="intelligencestack_audit_extract.csv",
+                mime="text/csv",
+            )
+        st.caption(
+            "Append-only by design: records are never rewritten. In production this is a "
+            "Delta table with retention and access policy applied — same record shape."
         )
 
 with tab3:

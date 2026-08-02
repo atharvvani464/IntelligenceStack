@@ -12,8 +12,11 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from src.cognitive.agent_core import MosaicAnalyticsAgent
+from src.governance.audit import ensure_audit_dir
+from src.lakehouse.audit_engine import AuditEngine
 
 agent_engine = MosaicAnalyticsAgent()
+audit_engine = AuditEngine()
 
 
 @asynccontextmanager
@@ -23,6 +26,9 @@ async def lifespan(_: FastAPI):
     # problem surfaces immediately rather than mid-demo.
     agent_engine.engine.build()
     agent_engine.knowledge.build()
+    # Create the audit directory up front so the first decision cannot fail to
+    # be recorded because the path does not exist yet.
+    ensure_audit_dir()
     yield
 
 
@@ -48,6 +54,8 @@ class AnalyticsResponse(BaseModel):
     payload: list
     citations: list
     trace_log: list[TraceEntry]
+    # Correlation id for this request's rows in the durable audit trail.
+    request_id: str
 
 
 @app.get("/health")
@@ -82,7 +90,25 @@ async def explore_lakehouse_metrics(payload: AnalyticsRequest) -> AnalyticsRespo
         payload=result.payload,
         citations=result.citations,
         trace_log=[TraceEntry(**step.as_dict()) for step in result.trace],
+        request_id=result.request_id,
     )
+
+
+@app.get("/api/v1/audit/summary")
+async def audit_summary() -> dict:
+    """Governance posture across every action ever recorded."""
+    return {
+        "summary": audit_engine.summary(),
+        "by_control": audit_engine.by_control(),
+        "by_function": audit_engine.by_function(),
+        "top_denied": audit_engine.top_denied_prompts(),
+    }
+
+
+@app.get("/api/v1/audit/recent")
+async def audit_recent(limit: int = 25) -> dict:
+    """The most recent governance decisions, newest first."""
+    return {"decisions": audit_engine.recent(limit=limit)}
 
 
 if __name__ == "__main__":

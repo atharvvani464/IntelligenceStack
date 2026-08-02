@@ -32,6 +32,7 @@ This is a working system, not a slide deck. Concretely:
 - **The governance boundary is code, not a claim.** Every proposed tool call passes through [`src/governance/policy.py`](src/governance/policy.py), which enforces three controls — a function allowlist (`FUNCTION_GRANT`), parameter-schema conformance (`PARAMETER_SCHEMA`), and SQL interdiction (`SQL_INTERDICTION`). A denial is a first-class, auditable outcome shown in the UI.
 - **SQL is parameter-bound, never interpolated.** The governed function is invoked with bound parameters ([`src/lakehouse/local_engine.py`](src/lakehouse/local_engine.py)). A hostile identifier matches no rows rather than altering the query.
 - **Retrieval is governed too, and it abstains.** `search_knowledge_base` is on the same allowlist, its free-text question is a bound value, and the agent declines to answer rather than cite a weak match (see below).
+- **Every decision is durable evidence.** Grants *and* refusals are appended to a tamper-resistant audit trail ([`src/governance/audit.py`](src/governance/audit.py)) that outlives the request and the process, and is queryable in the Trust Center tab.
 
 ## How a question flows through the system
 ```
@@ -63,6 +64,8 @@ Every step is recorded and shown in the UI's *Agent Trace Route* and *Governance
    → The agent calls **two** governed tools: it reports the live anomaly score *and* retrieves the remediation procedure from the governed corpus, citing the SRE Runbook. Each call clears the boundary independently, and both appear in the trace.
 5. **Honest abstention** — `What is our vacation policy?`
    → Retrieval runs but no passage sufficiently covers the question, so the agent says **"no governed knowledge covers that"** rather than citing a weak lexical match.
+6. **Proof, after the fact** — open the **🛡️ Trust Center** tab
+   → Every decision above is already recorded: what was asked, which function was proposed, which control ruled on it, and what it returned. Restart the API and it is all still there. This is the answer to *"show me exactly what the AI did."*
 
 ## Retrieval, and why it abstains
 The agent's second tool, `search_knowledge_base`, runs over a real vector index built from the documents in [`knowledge/`](knowledge/): passages are embedded and ranked by cosine similarity **computed inside the engine**.
@@ -79,6 +82,7 @@ Cosine score alone is not a safe relevance test on a small corpus — *"what is 
 | Knowledge index | [`src/lakehouse/knowledge_engine.py`](src/lakehouse/knowledge_engine.py) | Vector index over the governed document corpus; cosine similarity computed in-engine. |
 | Knowledge corpus | [`knowledge/`](knowledge/) | Enterprise runbooks, playbooks, and policies approved for retrieval. |
 | Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The enforced boundary, plus the Unity Catalog SQL that provisions it in production. |
+| Audit trail | [`src/governance/audit.py`](src/governance/audit.py) · [`audit_engine.py`](src/lakehouse/audit_engine.py) | Append-only record of every decision, and the SQL view that makes it queryable. |
 | Agent | [`src/cognitive/agent_core.py`](src/cognitive/agent_core.py) | Intent → governed tool call → grounded synthesis, with a full audit trace. |
 | API | [`src/api/app.py`](src/api/app.py) | FastAPI endpoint over the agent. |
 | Control plane | [`src/api/ui.py`](src/api/ui.py) | Streamlit dashboard: agent chat, live telemetry, architecture. |

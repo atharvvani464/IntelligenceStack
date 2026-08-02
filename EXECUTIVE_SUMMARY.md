@@ -29,7 +29,7 @@ Today, a business question like *"which customers are showing anomalous behaviou
 Most enterprise GenAI initiatives stall at legal and security review because "the LLM can see the data" is an unbounded risk. By making the agent structurally incapable of arbitrary data access — a refusal is enforced in code and auditable — the risk surface becomes a small, reviewable allowlist of functions. This converts an open-ended security conversation into a bounded one, which is what actually gets projects approved. A blocked request is not a failure; it is the control working, and it is logged as evidence for auditors.
 
 **3. Compliance posture is provable, not promised.**
-PII is hashed at ingestion (silver layer), the agent cannot exfiltrate raw rows, and every action produces a trace. For regimes like GDPR, HIPAA, or SOC 2, "show me exactly what the AI can and cannot do, and prove it" is answerable with the allowlist and the audit trail rather than with policy documents. This materially shortens audit cycles and reduces the cost of demonstrating control.
+PII is hashed at ingestion (silver layer), the agent cannot exfiltrate raw rows, and every governed action — granted or refused — is appended to a durable, tamper-resistant audit trail that outlives the request and the process. **This is implemented in the sandbox** (`src/governance/audit.py`), not asserted: the Trust Center in the control plane answers "show me exactly what the AI did" with a queryable record and an exportable extract. For regimes like GDPR, HIPAA, or SOC 2, that turns "prove it" into a query rather than a policy document, materially shortening audit cycles and reducing the cost of demonstrating control.
 
 **4. Total cost of ownership stays bounded as scale grows.**
 Bringing the AI to the data — rather than copying data out to external model providers — eliminates egress, duplicate storage, and third-party inference on proprietary data. Liquid Clustering and the Photon engine mean query cost scales with the data actually scanned, not the size of the lake, so the economics hold from millions to billions of rows.
@@ -52,5 +52,6 @@ The seams between sandbox and production are explicit and swap cleanly:
 - The synthetic JSON generator is replaced by **Enterprise Kafka Streams or Cloud Storage** ingested via Auto Loader.
 - The local deterministic planner is replaced by **Databricks Model Serving** (Llama 3 or custom DBRX variants) inside your secure VPC — set `DATABRICKS_HOST` / `DATABRICKS_TOKEN` and the same call path routes to the served model.
 - The in-code governance allowlist is replaced by native **Unity Catalog** `GRANT EXECUTE ON FUNCTION` with row/column-level security.
+- The append-only audit log is replaced by a **Delta table** with retention and access policy applied, or shipped to your SIEM — the record shape is unchanged.
 
 IntelligenceStack proves that enterprises no longer have to compromise between the capabilities of Agentic AI and the strict mandates of Data Governance — and it proves it with running code, not assertion.
