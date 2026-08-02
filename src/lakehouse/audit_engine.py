@@ -27,6 +27,9 @@ EMPTY_SUMMARY = {
     "distinct_requests": 0,
     "first_recorded": None,
     "last_recorded": None,
+    "p50_duration_ms": 0.0,
+    "p95_duration_ms": 0.0,
+    "max_duration_ms": 0.0,
 }
 
 
@@ -73,7 +76,10 @@ class AuditEngine:
                 COUNT(*) FILTER (WHERE executed),
                 COUNT(DISTINCT request_id),
                 MIN(recorded_at),
-                MAX(recorded_at)
+                MAX(recorded_at),
+                QUANTILE_CONT(duration_ms, 0.5),
+                QUANTILE_CONT(duration_ms, 0.95),
+                MAX(duration_ms)
             FROM audit_log
             """
         ).fetchone()
@@ -91,6 +97,9 @@ class AuditEngine:
             # strings so the API contract is a predictable JSON shape.
             "first_recorded": str(row[5]) if row[5] else None,
             "last_recorded": str(row[6]) if row[6] else None,
+            "p50_duration_ms": round(row[7], 2) if row[7] is not None else 0.0,
+            "p95_duration_ms": round(row[8], 2) if row[8] is not None else 0.0,
+            "max_duration_ms": round(row[9], 2) if row[9] is not None else 0.0,
         }
 
     def by_control(self) -> list[dict]:

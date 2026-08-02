@@ -1,0 +1,59 @@
+name: tests
+
+# The project's claim is that its behaviour is verifiable rather than asserted.
+# That only holds if the suite actually runs -- so it runs on every push and
+# every pull request, not when someone remembers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # Installs from requirements.txt exactly as the README instructs, so a
+        # broken quickstart fails here rather than in front of a reviewer.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Seed the demo dataset
+        # Deterministic: the same command the README documents, producing the
+        # same 3,000 events and therefore the same figures the tests assert.
+        run: PYTHONPATH=. python src/ingestion/synthetic_generator.py --seed-batch 120
+
+      - name: Run the test suite
+        run: PYTHONPATH=. pytest -q
+
+      - name: Verify the demo answers are reproducible
+        # Guards the headline figures quoted in the README and the deck. If the
+        # anomaly logic or the seed drifts, this fails loudly.
+        run: |
+          PYTHONPATH=. python - <<'PY'
+          from src.cognitive.agent_core import MosaicAnalyticsAgent
+          from src.lakehouse.local_engine import LakehouseEngine
+
+          engine = LakehouseEngine().build()
+          summary = engine.fleet_summary()
+          assert summary["total_events"] == 3000, summary
+
+          agent = MosaicAnalyticsAgent(engine=engine)
+          row = agent.run("Evaluate anomaly parameters for customer CUST_404").payload[0]
+          assert row["risk_factor"] == 82.35, row
+          assert (row["total_anomalies"], row["total_events"]) == (42, 51), row
+          print("demo figures reproduce exactly:", row)
+          PY

@@ -120,6 +120,20 @@ REGISTERED_FUNCTIONS: dict[str, FunctionSpec] = {
             )
         ],
     ),
+    "get_customer_timeline": FunctionSpec(
+        name="get_customer_timeline",
+        description=(
+            "Returns the day-by-day anomaly trajectory for a single customer, "
+            "for questions about whether behaviour is improving or worsening."
+        ),
+        parameters=[
+            ParameterSpec(
+                name="target_id",
+                pattern=r"CUST_\d{3}",
+                description="Customer identifier in the form CUST_123.",
+            )
+        ],
+    ),
     "search_knowledge_base": FunctionSpec(
         name="search_knowledge_base",
         description=(

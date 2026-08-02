@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import mlflow
@@ -43,6 +44,15 @@ _SQL_TOKENS = re.compile(
 # addition to) a metric. Deliberately excludes analytics vocabulary such as
 # "anomaly" or "evaluate" so that a pure metrics question stays a pure metrics
 # question and routes to the analytics function alone.
+# Signals that the question is about change over time rather than a single
+# current figure -- "is it getting worse?" instead of "how bad is it?".
+_TREND_INTENT = re.compile(
+    r"\b(trend|trending|timeline|over time|history|historical|trajectory|"
+    r"getting (?:worse|better)|improv\w*|deteriorat\w*|worsen\w*|"
+    r"day[- ]by[- ]day|daily|past few days|recently)\b",
+    re.IGNORECASE,
+)
+
 _KNOWLEDGE_INTENT = re.compile(
     r"\b(polic(?:y|ies)|procedure|process|runbook|playbook|handbook|guideline|"
     r"guidance|remediat\w*|escalat\w*|sla|tier|retention|pii|governance|"
@@ -77,6 +87,8 @@ class AgentResult:
     serving_mode: str = "local-deterministic-planner"
     # Correlates this response with its rows in the durable audit trail.
     request_id: str = ""
+    # End-to-end wall-clock cost of the whole request, in milliseconds.
+    duration_ms: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -88,6 +100,7 @@ class AgentResult:
             "executed": self.executed,
             "serving_mode": self.serving_mode,
             "request_id": self.request_id,
+            "duration_ms": self.duration_ms,
         }
 
 
@@ -120,23 +133,40 @@ class ModelServingClient:
         governance boundary before anything executes.
         """
         granted = {t["name"] for t in tools}
-        customer = _CUSTOMER_PATTERN.search(user_query)
+        # Every distinct customer named in the question, in order of appearance.
+        # Two or more means a comparison, which needs one governed call each.
+        targets: list[str] = []
+        for match in _CUSTOMER_PATTERN.finditer(user_query):
+            target_id = f"CUST_{match.group(1)}"
+            if target_id not in targets:
+                targets.append(target_id)
+
         wants_guidance = bool(_KNOWLEDGE_INTENT.search(user_query))
+        wants_trend = bool(_TREND_INTENT.search(user_query))
 
         calls: list[dict] = []
         reasons: list[str] = []
 
-        if customer and "get_customer_anomaly_score" in granted:
-            target_id = f"CUST_{customer.group(1)}"
-            calls.append(
-                {
-                    "function": "get_customer_anomaly_score",
-                    "parameters": {"target_id": target_id},
-                }
-            )
-            reasons.append(
-                f"names customer {target_id}, matched to the anomaly scoring function"
-            )
+        # A trend question asks about trajectory; anything else about a customer
+        # asks about their current standing. Either way, one call per customer.
+        metric_fn = (
+            "get_customer_timeline"
+            if wants_trend and "get_customer_timeline" in granted
+            else "get_customer_anomaly_score"
+        )
+
+        if targets and metric_fn in granted:
+            for target_id in targets:
+                calls.append(
+                    {"function": metric_fn, "parameters": {"target_id": target_id}}
+                )
+            if len(targets) > 1:
+                reasons.append(
+                    f"names {len(targets)} customers ({', '.join(targets)}), so each is "
+                    f"scored independently via {metric_fn}"
+                )
+            else:
+                reasons.append(f"names customer {targets[0]}, matched to {metric_fn}")
 
         if wants_guidance and "search_knowledge_base" in granted:
             calls.append(
@@ -169,6 +199,7 @@ class ModelServingClient:
         citations: list[dict] | None = None,
         searched_knowledge: bool = False,
         queried_metric: bool = True,
+        queried_trend: bool = False,
     ) -> str:
         """Ground a natural-language answer in the rows and passages retrieved.
 
@@ -178,7 +209,12 @@ class ModelServingClient:
         citing a weak match.
         """
         citations = citations or []
-        metric_part = self._synthesise_metric(payload, context) if queried_metric else ""
+        if queried_trend:
+            metric_part = self._synthesise_trend(payload)
+        elif queried_metric:
+            metric_part = self._synthesise_metric(payload, context)
+        else:
+            metric_part = ""
         guidance_part = self._synthesise_guidance(citations, searched_knowledge)
 
         if metric_part and guidance_part:
@@ -205,8 +241,83 @@ class ModelServingClient:
         lines.append(f"\nSources: {sources}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _synthesise_comparison(payload: list[dict], context: dict) -> str:
+        """Rank several customers against each other and the fleet baseline."""
+        fleet_mean = context.get("mean_latency_ms") or 0.0
+        ranked = sorted(payload, key=lambda r: r["risk_factor"], reverse=True)
+        worst, best = ranked[0], ranked[-1]
+
+        lines = [
+            f"**{worst['customer_id']} is the more serious case** of the "
+            f"{len(ranked)} compared."
+        ]
+        for row in ranked:
+            ratio = (row["mean_latency_ms"] / fleet_mean) if fleet_mean else 0.0
+            lines.append(
+                f"- **{row['customer_id']}** — {row['risk_factor']:.2f}% of "
+                f"{row['total_events']:,} events anomalous, mean latency "
+                f"{row['mean_latency_ms']:.2f} ms ({ratio:.1f}× the fleet baseline)."
+            )
+
+        gap = worst["risk_factor"] - best["risk_factor"]
+        if gap > 1:
+            lines.append(
+                f"\nThe gap is {gap:.2f} percentage points, so remediation effort "
+                f"should go to {worst['customer_id']} first."
+            )
+        else:
+            lines.append(
+                "\nTheir anomaly rates are within a point of each other, so neither "
+                "stands out as the priority on this measure alone."
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _synthesise_trend(payload: list[dict]) -> str:
+        """Describe a trajectory strictly from the daily rows returned."""
+        if not payload:
+            return (
+                "The timeline function executed but returned no rows — that customer "
+                "has no observed history in the gold layer."
+            )
+
+        by_customer: dict[str, list[dict]] = {}
+        for row in payload:
+            by_customer.setdefault(row["customer_id"], []).append(row)
+
+        parts = []
+        for customer_id, days in by_customer.items():
+            days = sorted(days, key=lambda d: d["day"])
+            first, last = days[0], days[-1]
+            total_events = sum(d["events"] for d in days)
+            total_anoms = sum(d["anomalies"] for d in days)
+            overall = 100.0 * total_anoms / total_events if total_events else 0.0
+            delta = last["anomaly_rate"] - first["anomaly_rate"]
+
+            if delta > 10:
+                direction = f"deteriorating (up {delta:.1f} points across the window)"
+            elif delta < -10:
+                direction = f"improving (down {abs(delta):.1f} points across the window)"
+            else:
+                direction = "broadly stable across the window"
+
+            peak = max(days, key=lambda d: d["anomaly_rate"])
+            parts.append(
+                f"**{customer_id}** is {direction}. Over {len(days)} observed day(s) it "
+                f"logged {total_events:,} events with {total_anoms:,} anomalous "
+                f"({overall:.1f}% overall), moving from {first['anomaly_rate']:.1f}% on "
+                f"{first['day']} to {last['anomaly_rate']:.1f}% on {last['day']}. "
+                f"Worst day was {peak['day']} at {peak['anomaly_rate']:.1f}%."
+            )
+        return "\n\n".join(parts)
+
     def _synthesise_metric(self, payload: list[dict], context: dict) -> str:
         """Ground a natural-language answer in the returned rows."""
+        # More than one customer means the question was a comparison, and the
+        # answer must actually compare rather than describe each in isolation.
+        if len({row["customer_id"] for row in payload}) > 1:
+            return self._synthesise_comparison(payload, context)
         if not payload:
             return (
                 "The governed function executed successfully but returned no rows — "
@@ -278,6 +389,7 @@ class MosaicAnalyticsAgent:
         result = AgentResult(answer="", serving_mode=self.serving.mode)
         request_id = new_request_id()
         result.request_id = request_id
+        started = time.perf_counter()
 
         # ---- Stage 1: intent resolution ------------------------------- #
         with mlflow.start_span(name="llm_intent_classification") as span:
@@ -313,6 +425,7 @@ class MosaicAnalyticsAgent:
         # returned alongside a refusal.
         fleet: dict = {}
         queried_metric = False
+        queried_trend = False
         searched_knowledge = False
 
         if not plan["calls"]:
@@ -335,7 +448,10 @@ class MosaicAnalyticsAgent:
                     detail="No statement was submitted to the lakehouse.",
                 )
             )
-            self._audit(request_id, user_query, decision)
+            result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            self._audit(
+                request_id, user_query, decision, duration_ms=result.duration_ms
+            )
             return result
 
         for call in plan["calls"]:
@@ -359,31 +475,43 @@ class MosaicAnalyticsAgent:
                         detail="No statement was submitted to the lakehouse.",
                     )
                 )
-                self._audit(request_id, user_query, decision)
+                result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                self._audit(
+                    request_id, user_query, decision, duration_ms=result.duration_ms
+                )
                 return result
 
             # What *this* call returned. Tracked per call so each audit record
             # reports its own outcome rather than the accumulated result.
             call_rows = 0
             call_citations = 0
+            call_started = time.perf_counter()
 
-            if call["function"] == "get_customer_anomaly_score":
+            if call["function"] in ("get_customer_anomaly_score", "get_customer_timeline"):
+                fn = call["function"]
                 target_id = decision.parameters["target_id"]
                 with mlflow.start_span(name="execute_lakehouse_tool") as tool_span:
-                    result.payload = self.engine.get_customer_anomaly_score(target_id)
+                    if fn == "get_customer_timeline":
+                        rows = self.engine.get_customer_timeline(target_id)
+                        queried_trend = True
+                    else:
+                        rows = self.engine.get_customer_anomaly_score(target_id)
+                        queried_metric = True
                     fleet = self.engine.fleet_summary()
                     tool_span.set_attribute("resolved_target_id", target_id)
-                    tool_span.set_attribute("lakehouse_payload_size", len(result.payload))
-                queried_metric = True
-                call_rows = len(result.payload)
+                    tool_span.set_attribute("lakehouse_payload_size", len(rows))
+                # Accumulate: a comparison issues one call per customer, and the
+                # answer needs every row, not just the last call's.
+                result.payload.extend(rows)
+                call_rows = len(rows)
                 result.trace.append(
                     TraceStep(
                         step="Lakehouse Execution",
                         status="Completed",
                         detail=(
-                            f"Invoked {self.catalog}.{self.schema}.get_customer_anomaly_score "
-                            f"with bound parameter target_id={target_id!r}. "
-                            f"Returned {len(result.payload)} row(s) from the gold layer."
+                            f"Invoked {self.catalog}.{self.schema}.{fn} with bound "
+                            f"parameter target_id={target_id!r}. "
+                            f"Returned {len(rows)} row(s) from the gold layer."
                         ),
                     )
                 )
@@ -418,6 +546,7 @@ class MosaicAnalyticsAgent:
                 executed=True,
                 rows_returned=call_rows,
                 citations_returned=call_citations,
+                duration_ms=round((time.perf_counter() - call_started) * 1000, 2),
             )
 
         # ---- Stage 4: grounded synthesis ------------------------------ #
@@ -429,6 +558,7 @@ class MosaicAnalyticsAgent:
                 citations=result.citations,
                 searched_knowledge=searched_knowledge,
                 queried_metric=queried_metric,
+                queried_trend=queried_trend,
             )
 
         result.trace.append(
@@ -442,6 +572,7 @@ class MosaicAnalyticsAgent:
                 ),
             )
         )
+        result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
         return result
 
     @staticmethod
