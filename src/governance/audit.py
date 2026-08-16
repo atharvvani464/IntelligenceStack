@@ -57,6 +57,10 @@ class AuditRecord:
     control: str
     detail: str
     parameters: dict = field(default_factory=dict)
+    # Who asked. An audit trail that records what happened but not who did it
+    # cannot answer an auditor's first question.
+    principal_id: str = ""
+    principal_role: str = ""
     executed: bool = False
     rows_returned: int = 0
     citations_returned: int = 0

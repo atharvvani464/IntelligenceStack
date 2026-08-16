@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import mlflow
 
 from src.governance.audit import AuditRecord, AuditTrail, new_request_id
+from src.governance.identity import SERVICE_PRINCIPAL, Principal
 from src.governance.policy import available_tool_schemas, enforce
 from src.lakehouse.knowledge_engine import KNOWLEDGE_INDEX, KnowledgeEngine
 from src.lakehouse.local_engine import LakehouseEngine
@@ -87,6 +88,8 @@ class AgentResult:
     serving_mode: str = "local-deterministic-planner"
     # Correlates this response with its rows in the durable audit trail.
     request_id: str = ""
+    # The caller this answer was produced for.
+    principal_id: str = ""
     # End-to-end wall-clock cost of the whole request, in milliseconds.
     duration_ms: float = 0.0
 
@@ -100,6 +103,7 @@ class AgentResult:
             "executed": self.executed,
             "serving_mode": self.serving_mode,
             "request_id": self.request_id,
+            "principal_id": self.principal_id,
             "duration_ms": self.duration_ms,
         }
 
@@ -363,7 +367,9 @@ class MosaicAnalyticsAgent:
         self.catalog = CATALOG
         self.schema = SCHEMA
 
-    def _audit(self, request_id: str, prompt: str, decision, **outcome) -> None:
+    def _audit(
+        self, request_id: str, prompt: str, decision, principal: Principal, **outcome
+    ) -> None:
         """Persist one governance decision as durable evidence.
 
         Called for grants and denials alike -- a refusal is the control working,
@@ -378,15 +384,24 @@ class MosaicAnalyticsAgent:
                 control=decision.control,
                 detail=decision.detail,
                 parameters=decision.parameters,
+                principal_id=principal.principal_id,
+                principal_role=principal.role,
                 serving_mode=self.serving.mode,
                 **outcome,
             )
         )
 
     @mlflow.trace(name="execute_cognitive_loop")
-    def run(self, user_query: str) -> AgentResult:
+    def run(
+        self, user_query: str, principal: Principal | None = None
+    ) -> AgentResult:
+        # No caller supplied means the unrestricted service identity, matching
+        # how the sandbox behaved before identities existed. Named explicitly so
+        # its use is visible in the audit trail rather than implied.
+        principal = principal or SERVICE_PRINCIPAL
         tools = available_tool_schemas()
         result = AgentResult(answer="", serving_mode=self.serving.mode)
+        result.principal_id = principal.principal_id
         request_id = new_request_id()
         result.request_id = request_id
         started = time.perf_counter()
@@ -431,7 +446,7 @@ class MosaicAnalyticsAgent:
         if not plan["calls"]:
             # No proposed call still passes through the boundary, so a refusal
             # is produced by the same control that governs every other request.
-            decision = enforce(None, {})
+            decision = enforce(None, {}, principal)
             result.governance = decision.as_dict()
             result.trace.append(
                 TraceStep(
@@ -450,12 +465,13 @@ class MosaicAnalyticsAgent:
             )
             result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
             self._audit(
-                request_id, user_query, decision, duration_ms=result.duration_ms
+                request_id, user_query, decision, principal,
+                duration_ms=result.duration_ms,
             )
             return result
 
         for call in plan["calls"]:
-            decision = enforce(call["function"], call["parameters"])
+            decision = enforce(call["function"], call["parameters"], principal)
             result.governance = decision.as_dict()
             result.trace.append(
                 TraceStep(
@@ -477,7 +493,8 @@ class MosaicAnalyticsAgent:
                 )
                 result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
                 self._audit(
-                    request_id, user_query, decision, duration_ms=result.duration_ms
+                    request_id, user_query, decision, principal,
+                    duration_ms=result.duration_ms,
                 )
                 return result
 
@@ -543,6 +560,7 @@ class MosaicAnalyticsAgent:
                 request_id,
                 user_query,
                 decision,
+                principal,
                 executed=True,
                 rows_returned=call_rows,
                 citations_returned=call_citations,

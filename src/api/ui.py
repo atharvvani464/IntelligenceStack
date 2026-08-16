@@ -66,10 +66,42 @@ with st.sidebar:
     except Exception:
         st.error("Agent API unreachable. Start the FastAPI backend on port 8000.")
 
+    # Acting-as switcher. The same question asked by different principals is
+    # supposed to produce different, correct outcomes -- that is row-level
+    # entitlement, and it is easiest to believe when you can toggle it live.
+    st.markdown("### Acting as")
+    try:
+        principals = requests.get(f"{API_BASE_URL}/api/v1/identities", timeout=5).json()[
+            "principals"
+        ]
+    except Exception:
+        principals = []
+
+    if principals:
+        labels = {p["principal_id"]: f"{p['display_name']} — {p['role']}" for p in principals}
+        chosen = st.selectbox(
+            "Caller identity",
+            options=list(labels),
+            format_func=lambda pid: labels[pid],
+            label_visibility="collapsed",
+        )
+        st.session_state.principal_id = chosen
+        current = next(p for p in principals if p["principal_id"] == chosen)
+        st.caption(f"**Scope:** {current['customer_scope']}")
+        st.caption(
+            "**Entitled tools:** "
+            + (", ".join(f"`{f}`" for f in current["allowed_functions"]) or "_none_")
+        )
+        st.caption(current["description"])
+    else:
+        st.session_state.principal_id = None
+        st.caption("Identity directory unavailable; requests run as the service identity.")
+
     st.markdown("### Governance")
     st.toggle("Unity Catalog Strict Mode", value=True, disabled=True)
     st.toggle("Parameter-Bound Execution", value=True, disabled=True)
     st.toggle("SQL Interdiction", value=True, disabled=True)
+    st.toggle("Per-Caller Entitlement", value=True, disabled=True)
 
 st.title("🛡️ IntelligenceStack Control Plane")
 st.markdown("---")
@@ -110,7 +142,10 @@ with tab1:
                 try:
                     response = requests.post(
                         f"{API_BASE_URL}/api/v1/agent/explore",
-                        json={"prompt": prompt_input},
+                        json={
+                            "prompt": prompt_input,
+                            "principal_id": st.session_state.get("principal_id"),
+                        },
                         timeout=45,
                     )
                 except Exception as exc:
@@ -157,9 +192,12 @@ with tab1:
                     st.markdown("**Raw governed function output:**")
                     st.dataframe(pd.DataFrame(output["payload"]), use_container_width=True)
 
+                who = output.get("principal", {})
                 st.caption(
-                    f"Model serving mode: `{output['serving_mode']}` · "
-                    f"answered in **{output['duration_ms']:.0f} ms** · "
+                    f"Answered for **{who.get('display_name', 'service')}** "
+                    f"({who.get('role', 'service')}) · "
+                    f"serving `{output['serving_mode']}` · "
+                    f"**{output['duration_ms']:.0f} ms** · "
                     f"audit ref `{output['request_id']}`"
                 )
                 st.session_state.chat_history.append({"role": "assistant", "content": output["answer"]})
@@ -286,6 +324,15 @@ with tab5:
             st.markdown("#### Invocations by governed function")
             st.dataframe(
                 pd.DataFrame(audit["by_function"]), use_container_width=True, hide_index=True
+            )
+
+        if audit.get("by_principal"):
+            st.markdown("#### Activity by caller")
+            st.caption("Who asked, and how often the boundary said no to them.")
+            st.dataframe(
+                pd.DataFrame(audit["by_principal"]),
+                use_container_width=True,
+                hide_index=True,
             )
 
         if audit["top_denied"]:
