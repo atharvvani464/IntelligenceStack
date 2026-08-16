@@ -138,6 +138,34 @@ class AuditEngine:
             for r in rows
         ]
 
+    def by_principal(self) -> list[dict]:
+        """Activity per caller -- the "who did what" view an auditor asks for."""
+        if not self._load():
+            return []
+        rows = self._con.execute(
+            """
+            SELECT
+                COALESCE(NULLIF(principal_id, ''), '(no caller recorded)') AS who,
+                ANY_VALUE(principal_role)           AS role,
+                COUNT(*)                            AS decisions,
+                COUNT(*) FILTER (WHERE allowed)     AS granted,
+                COUNT(*) FILTER (WHERE NOT allowed) AS denied
+            FROM audit_log
+            GROUP BY who
+            ORDER BY decisions DESC
+            """
+        ).fetchall()
+        return [
+            {
+                "principal": r[0],
+                "role": r[1] or "",
+                "decisions": r[2],
+                "granted": r[3],
+                "denied": r[4],
+            }
+            for r in rows
+        ]
+
     def top_denied_prompts(self, limit: int = 5) -> list[dict]:
         """The questions most often refused -- what users try that they may not do."""
         if not self._load():
@@ -162,7 +190,8 @@ class AuditEngine:
         rows = self._con.execute(
             """
             SELECT recorded_at, request_id, prompt, function, allowed, control,
-                   executed, rows_returned, citations_returned
+                   executed, rows_returned, citations_returned,
+                   COALESCE(NULLIF(principal_id, ''), '(none)') AS principal_id
             FROM audit_log
             ORDER BY recorded_at DESC
             LIMIT ?
@@ -172,6 +201,7 @@ class AuditEngine:
         return [
             {
                 "recorded_at": r[0],
+                "principal": r[9],
                 "request_id": r[1],
                 "prompt": r[2],
                 "function": r[3],

@@ -5,7 +5,7 @@ The architectural argument of IntelligenceStack is that an LLM must act as an
 if something mechanically enforces it. This module is that something.
 
 Every request the agent wishes to execute passes through `enforce()`, which
-applies three controls in order:
+applies four controls in order:
 
   1. FUNCTION_GRANT  -- the requested function must be registered in the catalog
                         allowlist. This mirrors `GRANT EXECUTE ON FUNCTION` in
@@ -16,6 +16,11 @@ applies three controls in order:
                         it reaches the engine.
   3. SQL_INTERDICTION -- any attempt to smuggle SQL through a parameter is
                         refused outright.
+  4. ENTITLEMENT     -- the *caller* must be entitled to this function, and to
+                        the specific row requested. The first three controls
+                        bound what the agent may do; this one bounds what this
+                        particular person may ask it to do, which is the other
+                        half of least privilege. See `identity.py`.
 
 A denial is a first-class, auditable outcome -- not an exception and not a
 silent fallback. The agent surfaces it to the caller verbatim.
@@ -24,6 +29,7 @@ silent fallback. The agent surfaces it to the caller verbatim.
 import re
 from dataclasses import dataclass, field
 
+from src.governance.identity import SERVICE_PRINCIPAL, Principal
 from src.settings import CATALOG, SCHEMA
 
 
@@ -175,6 +181,9 @@ class GovernanceDecision:
     detail: str
     function: str | None = None
     parameters: dict = field(default_factory=dict)
+    # The caller this decision was made for. Carried on the decision so the
+    # audit trail can answer "who ran this?" and not just "what ran?".
+    principal_id: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -183,12 +192,23 @@ class GovernanceDecision:
             "detail": self.detail,
             "function": self.function,
             "parameters": self.parameters,
+            "principal_id": self.principal_id,
         }
 
 
-def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDecision:
-    """Apply the governance boundary to a proposed function invocation."""
+def enforce(
+    function_name: str | None,
+    parameters: dict | None,
+    principal: Principal | None = None,
+) -> GovernanceDecision:
+    """Apply the governance boundary to a proposed function invocation.
+
+    `principal` is the authenticated caller. When omitted the unrestricted
+    service identity is used, preserving the callerless behaviour the sandbox
+    had before identities existed -- see `identity.SERVICE_PRINCIPAL`.
+    """
     parameters = parameters or {}
+    principal = principal or SERVICE_PRINCIPAL
 
     # Control 1 -- function-level grant.
     if not function_name or function_name not in REGISTERED_FUNCTIONS:
@@ -202,6 +222,7 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
             ),
             function=function_name,
             parameters=parameters,
+            principal_id=principal.principal_id,
         )
 
     spec = REGISTERED_FUNCTIONS[function_name]
@@ -251,6 +272,7 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
             ),
             function=function_name,
             parameters=parameters,
+            principal_id=principal.principal_id,
         )
 
     # Control 2 -- parameter schema conformance.
@@ -263,6 +285,7 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
                     detail=f"Required parameter '{param.name}' was not supplied.",
                     function=function_name,
                     parameters=parameters,
+                    principal_id=principal.principal_id,
                 )
             continue
 
@@ -274,6 +297,7 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
                 detail=error,
                 function=function_name,
                 parameters=parameters,
+                principal_id=principal.principal_id,
             )
 
     undeclared = set(parameters) - {p.name for p in spec.parameters}
@@ -284,17 +308,53 @@ def enforce(function_name: str | None, parameters: dict | None) -> GovernanceDec
             detail=f"Undeclared parameters rejected: {sorted(undeclared)}.",
             function=function_name,
             parameters=parameters,
+            principal_id=principal.principal_id,
+        )
+
+    # Control 4 -- per-caller entitlement. The allowlist says the *agent* may
+    # call this function; entitlement says whether *this caller* may, and
+    # against this row. Checked last so that a malformed or hostile request is
+    # reported as such rather than as an authorisation problem.
+    if not principal.may_invoke(function_name):
+        return GovernanceDecision(
+            allowed=False,
+            control="ENTITLEMENT",
+            detail=(
+                f"{principal.display_name} ({principal.role}) is not entitled to "
+                f"invoke {function_name}. Entitled functions for this caller: "
+                f"{sorted(principal.allowed_functions) or 'none'}."
+            ),
+            function=function_name,
+            parameters=parameters,
+            principal_id=principal.principal_id,
+        )
+
+    target_id = parameters.get("target_id")
+    if target_id and not principal.may_see_customer(target_id):
+        return GovernanceDecision(
+            allowed=False,
+            control="ENTITLEMENT",
+            detail=(
+                f"{principal.display_name} ({principal.role}) may invoke "
+                f"{function_name}, but {target_id} is outside their assigned scope "
+                f"of {principal.scope_label()}. Row-level entitlement refused."
+            ),
+            function=function_name,
+            parameters=parameters,
+            principal_id=principal.principal_id,
         )
 
     return GovernanceDecision(
         allowed=True,
         control="FUNCTION_GRANT",
         detail=(
-            f"EXECUTE granted on {spec.fully_qualified_name}; arguments conform to "
-            "the declared schema and are bound as parameters."
+            f"EXECUTE granted on {spec.fully_qualified_name} for "
+            f"{principal.display_name} ({principal.role}); arguments conform to the "
+            "declared schema and are bound as parameters."
         ),
         function=function_name,
         parameters=parameters,
+        principal_id=principal.principal_id,
     )
 
 
