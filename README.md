@@ -88,14 +88,15 @@ Cosine score alone is not a safe relevance test on a small corpus — *"what is 
 | Ingestion | [`src/ingestion/synthetic_generator.py`](src/ingestion/synthetic_generator.py) | Generates streaming JSON telemetry with a real, biased anomaly cohort. |
 | Pipeline (reference) | [`src/ingestion/dlt_pipeline.py`](src/ingestion/dlt_pipeline.py) | Delta Live Tables bronze→silver→gold as it runs on a real workspace. |
 | Local lakehouse | [`src/lakehouse/local_engine.py`](src/lakehouse/local_engine.py) | Materialises the same medallion topology in DuckDB; serves the governed function. |
-| Knowledge index | [`src/lakehouse/knowledge_engine.py`](src/lakehouse/knowledge_engine.py) | Vector index over the governed document corpus; cosine similarity computed in-engine. |
+| Knowledge index | [`src/lakehouse/knowledge_engine.py`](src/lakehouse/knowledge_engine.py) · [`vector_engine.py`](src/cognitive/vector_engine.py) | Vector index over the governed corpus with cosine similarity computed in-engine, plus the Mosaic AI Vector Search provisioning it maps to in production. |
 | Knowledge corpus | [`knowledge/`](knowledge/) | Enterprise runbooks, playbooks, and policies approved for retrieval. |
-| Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The enforced boundary and the allowlist of three governed functions, plus the Unity Catalog SQL that provisions it in production. |
+| Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The four-control boundary and the allowlist of three governed functions, plus the Unity Catalog SQL that provisions it in production. |
 | Audit trail | [`src/governance/audit.py`](src/governance/audit.py) · [`audit_engine.py`](src/lakehouse/audit_engine.py) | Append-only record of every decision — including who made it — and the SQL view that makes it queryable. |
 | Identity | [`src/governance/identity.py`](src/governance/identity.py) | Principals, per-caller function grants, and customer row scopes. |
-| Agent | [`src/cognitive/agent_core.py`](src/cognitive/agent_core.py) | Intent → governed tool call → grounded synthesis, with a full audit trace. |
+| Agent | [`src/cognitive/agent_core.py`](src/cognitive/agent_core.py) | Intent → *N* governed tool calls → grounded synthesis, with a full traced and timed audit path. |
 | API | [`src/api/app.py`](src/api/app.py) | FastAPI endpoint over the agent. |
-| Control plane | [`src/api/ui.py`](src/api/ui.py) | Streamlit dashboard: agent chat, live telemetry, architecture. |
+| Control plane | [`src/api/ui.py`](src/api/ui.py) | Streamlit dashboard: agent chat, live telemetry, knowledge index, Trust Center, architecture, and the caller switcher. |
+| Tests & CI | [`tests/`](tests/) · [`.github/workflows/tests.yml`](.github/workflows/tests.yml) | 77 tests across computation, governance, retrieval, audit, multi-step and identity — run on every push. |
 
 ## Quickstart
 
