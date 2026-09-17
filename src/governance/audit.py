@@ -69,6 +69,9 @@ class AuditRecord:
     # question "is this fast enough?" is answered by measurement rather than
     # assertion -- and so a slow tool can be identified after the fact.
     duration_ms: float = 0.0
+    # Columns redacted in this call's result before it was returned -- see
+    # `governance/masking.py`. Empty means nothing was masked.
+    masked_columns: list[str] = field(default_factory=list)
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     recorded_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()

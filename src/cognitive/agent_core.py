@@ -26,6 +26,7 @@ import mlflow
 
 from src.governance.audit import AuditRecord, AuditTrail, new_request_id
 from src.governance.identity import SERVICE_PRINCIPAL, Principal
+from src.governance.masking import mask_rows
 from src.governance.policy import available_tool_schemas, enforce
 from src.governance.quota import enforce_quota
 from src.lakehouse.knowledge_engine import KNOWLEDGE_INDEX, KnowledgeEngine
@@ -247,6 +248,16 @@ class ModelServingClient:
         return "\n".join(lines)
 
     @staticmethod
+    def _fmt_count(value) -> str:
+        """Render a row count, or pass a masked value through verbatim.
+
+        A masked column (see `governance/masking.py`) holds a sentinel string
+        rather than an int, and a numeric format spec on a string raises --
+        so this is the one seam where synthesis must check before it formats.
+        """
+        return f"{value:,}" if isinstance(value, int) else str(value)
+
+    @staticmethod
     def _synthesise_comparison(payload: list[dict], context: dict) -> str:
         """Rank several customers against each other and the fleet baseline."""
         fleet_mean = context.get("mean_latency_ms") or 0.0
@@ -261,8 +272,9 @@ class ModelServingClient:
             ratio = (row["mean_latency_ms"] / fleet_mean) if fleet_mean else 0.0
             lines.append(
                 f"- **{row['customer_id']}** — {row['risk_factor']:.2f}% of "
-                f"{row['total_events']:,} events anomalous, mean latency "
-                f"{row['mean_latency_ms']:.2f} ms ({ratio:.1f}× the fleet baseline)."
+                f"{ModelServingClient._fmt_count(row['total_events'])} events anomalous, "
+                f"mean latency {row['mean_latency_ms']:.2f} ms "
+                f"({ratio:.1f}× the fleet baseline)."
             )
 
         gap = worst["risk_factor"] - best["risk_factor"]
@@ -344,10 +356,11 @@ class ModelServingClient:
 
         return (
             f"Customer {row['customer_id']} is {verdict}. "
-            f"Across {row['total_events']:,} observed events, {row['total_anomalies']:,} "
-            f"exceeded the anomaly threshold of {threshold:.1f} ms, giving a risk factor "
-            f"of {row['risk_factor']:.2f} (percentage of traffic classified anomalous). "
-            f"Mean latency is {row['mean_latency_ms']:.2f} ms against a fleet baseline of "
+            f"Across {self._fmt_count(row['total_events'])} observed events, "
+            f"{self._fmt_count(row['total_anomalies'])} exceeded the anomaly threshold "
+            f"of {threshold:.1f} ms, giving a risk factor of {row['risk_factor']:.2f} "
+            f"(percentage of traffic classified anomalous). Mean latency is "
+            f"{row['mean_latency_ms']:.2f} ms against a fleet baseline of "
             f"{fleet_mean:.2f} ms — {ratio:.1f}x the population average."
         )
 
@@ -534,6 +547,7 @@ class MosaicAnalyticsAgent:
             # reports its own outcome rather than the accumulated result.
             call_rows = 0
             call_citations = 0
+            call_masked: list[str] = []
             call_started = time.perf_counter()
 
             if call["function"] in ("get_customer_anomaly_score", "get_customer_timeline"):
@@ -549,6 +563,26 @@ class MosaicAnalyticsAgent:
                     fleet = self.engine.fleet_summary()
                     tool_span.set_attribute("resolved_target_id", target_id)
                     tool_span.set_attribute("lakehouse_payload_size", len(rows))
+
+                # Column-level entitlement, applied before the row reaches the
+                # payload *or* synthesis -- see `governance/masking.py` for why
+                # both matter.
+                if rows:
+                    call_masked = sorted(principal.masked_columns & rows[0].keys())
+                if call_masked:
+                    rows = mask_rows(rows, principal.masked_columns)
+                    result.trace.append(
+                        TraceStep(
+                            step="Column Masking",
+                            status="Applied",
+                            detail=(
+                                f"{principal.display_name} ({principal.role}) is not "
+                                f"entitled to raw values for {call_masked}; redacted "
+                                "before synthesis and before being returned to the caller."
+                            ),
+                        )
+                    )
+
                 # Accumulate: a comparison issues one call per customer, and the
                 # answer needs every row, not just the last call's.
                 result.payload.extend(rows)
@@ -597,6 +631,7 @@ class MosaicAnalyticsAgent:
                 rows_returned=call_rows,
                 citations_returned=call_citations,
                 duration_ms=round((time.perf_counter() - call_started) * 1000, 2),
+                masked_columns=call_masked,
             )
 
         # ---- Stage 4: grounded synthesis ------------------------------ #

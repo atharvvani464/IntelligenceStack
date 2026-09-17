@@ -38,6 +38,7 @@ This is a working system, not a slide deck. Concretely:
 - **Performance is measured, not claimed.** Every call is timed; p50/p95 latency appears in the Trust Center alongside the decisions.
 - **Least privilege is per-caller.** Each principal carries its own function grants and customer scope ([`src/governance/identity.py`](src/governance/identity.py)), so the same question asked by an analyst and an SRE correctly produces different outcomes — and every audit record names who asked.
 - **Least privilege has a budget, not just a scope.** Entitlement says *what* a caller may touch; the resource quota says *how much* — an analyst's "compare" question is capped at 2 customers per request and 10 governed calls per minute, so an entitled caller still can't turn one prompt into unbounded warehouse cost. The SRE's on-call budget is wider; the service identity and the auditor are unrestricted because their access is already fully governed by entitlement alone.
+- **Least privilege has a column, not just a row.** An entitled, in-scope caller can still be restricted to *part of* a row: the analyst's book gives her every customer's risk signal, but `src/governance/masking.py` redacts the raw traffic-volume columns (need-to-know for triage, not capacity planning) — before the row reaches the payload *and* before it reaches synthesis, so the redacted figure can't leak back out through the narrated answer instead.
 
 ## How a question flows through the system
 ```
@@ -96,11 +97,12 @@ Cosine score alone is not a safe relevance test on a small corpus — *"what is 
 | Governance | [`src/governance/policy.py`](src/governance/policy.py) · [`uc_bootstrap.py`](src/governance/uc_bootstrap.py) | The four-control boundary and the allowlist of three governed functions, plus the Unity Catalog SQL that provisions it in production. |
 | Resource quota | [`src/governance/quota.py`](src/governance/quota.py) | The fifth control: per-request fan-out and per-minute call-rate budgets, per principal, checked with a SQL aggregate over the audit trail. |
 | Audit trail | [`src/governance/audit.py`](src/governance/audit.py) · [`audit_engine.py`](src/lakehouse/audit_engine.py) | Append-only record of every decision — including who made it — and the SQL view that makes it queryable, including the rolling-window query that backs the rate limit. |
-| Identity | [`src/governance/identity.py`](src/governance/identity.py) | Principals, per-caller function grants, customer row scopes, and resource-quota budgets. |
+| Identity | [`src/governance/identity.py`](src/governance/identity.py) | Principals, per-caller function grants, customer row scopes, resource-quota budgets, and masked columns. |
+| Column masking | [`src/governance/masking.py`](src/governance/masking.py) | Per-caller column redaction, applied before synthesis so a masked figure cannot leak back out through the narrated answer. |
 | Agent | [`src/cognitive/agent_core.py`](src/cognitive/agent_core.py) | Intent → *N* governed tool calls → grounded synthesis, with a full traced and timed audit path. |
 | API | [`src/api/app.py`](src/api/app.py) | FastAPI endpoint over the agent. |
 | Control plane | [`src/api/ui.py`](src/api/ui.py) | Streamlit dashboard: agent chat, live telemetry, knowledge index, Trust Center, architecture, and the caller switcher. |
-| Tests & CI | [`tests/`](tests/) · [`.github/workflows/tests.yml`](.github/workflows/tests.yml) | 88 tests across computation, governance, retrieval, audit, multi-step, identity and resource quota — run on every push. |
+| Tests & CI | [`tests/`](tests/) · [`.github/workflows/tests.yml`](.github/workflows/tests.yml) | 102 tests across computation, governance, retrieval, audit, multi-step, identity, resource quota and column masking — run on every push. |
 
 ## Quickstart
 

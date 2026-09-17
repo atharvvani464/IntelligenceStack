@@ -52,6 +52,13 @@ class Principal:
     # budget is never mistaken for the reason a request was refused.
     max_fanout: int | None = None
     rate_limit_per_minute: int | None = None
+    # Column-level entitlement -- see `governance/masking.py`. Names of
+    # governed-function result columns this principal may not see raw values
+    # for. Empty means nothing is masked. Deliberately keyed by column name
+    # rather than function name: it applies to whichever governed function
+    # happens to return a column with that name, the same way a Unity Catalog
+    # column mask follows the column wherever it appears.
+    masked_columns: frozenset[str] = field(default_factory=frozenset)
     description: str = ""
 
     # -- function-level entitlement ---------------------------------- #
@@ -102,6 +109,7 @@ class Principal:
             "max_fanout": self.max_fanout,
             "rate_limit_per_minute": self.rate_limit_per_minute,
             "budget": self.budget_label(),
+            "masked_columns": sorted(self.masked_columns),
             "description": self.description,
         }
 
@@ -152,11 +160,13 @@ PRINCIPALS: dict[str, Principal] = {
         can_view_audit=False,
         max_fanout=2,
         rate_limit_per_minute=10,
+        masked_columns=frozenset({"total_events", "total_anomalies"}),
         description=(
             "Analyst assigned to the CUST_400–CUST_419 book. May use every "
             "analytical tool, but only against customers in that book, and "
             "within a budget sized for interactive lookups rather than bulk "
-            "export."
+            "export. Sees the derived risk signal but not raw traffic volume, "
+            "which is need-to-know for relationship management, not triage."
         ),
     ),
     "auditor.silva": Principal(
