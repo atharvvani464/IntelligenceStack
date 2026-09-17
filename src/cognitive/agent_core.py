@@ -27,6 +27,7 @@ import mlflow
 from src.governance.audit import AuditRecord, AuditTrail, new_request_id
 from src.governance.identity import SERVICE_PRINCIPAL, Principal
 from src.governance.policy import available_tool_schemas, enforce
+from src.governance.quota import enforce_quota
 from src.lakehouse.knowledge_engine import KNOWLEDGE_INDEX, KnowledgeEngine
 from src.lakehouse.local_engine import LakehouseEngine
 from src.settings import CATALOG, SCHEMA
@@ -433,6 +434,37 @@ class MosaicAnalyticsAgent:
                     ),
                 )
             )
+
+        # ---- Stage 1b: resource-quota check --------------------------- #
+        # A property of the *plan*, not any one call, so it is checked once
+        # here rather than inside the per-call loop below. Denied before any
+        # call is even proposed to the boundary, the same fail-closed posture
+        # every other control uses.
+        if plan["calls"]:
+            quota_decision = enforce_quota(principal, len(plan["calls"]), self.audit.log_path)
+            if quota_decision is not None:
+                result.governance = quota_decision.as_dict()
+                result.trace.append(
+                    TraceStep(
+                        step="Governance Boundary Check",
+                        status="Denied",
+                        detail=quota_decision.detail,
+                    )
+                )
+                result.answer = self._refusal(quota_decision)
+                result.trace.append(
+                    TraceStep(
+                        step="Execution",
+                        status="Blocked",
+                        detail="No statement was submitted to the lakehouse.",
+                    )
+                )
+                result.duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                self._audit(
+                    request_id, user_query, quota_decision, principal,
+                    duration_ms=result.duration_ms,
+                )
+                return result
 
         # ---- Stages 2 & 3: per-call governance, then governed execution -- #
         # Each proposed call clears the boundary on its own merits. A single

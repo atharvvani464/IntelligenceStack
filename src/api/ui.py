@@ -92,6 +92,7 @@ with st.sidebar:
             "**Entitled tools:** "
             + (", ".join(f"`{f}`" for f in current["allowed_functions"]) or "_none_")
         )
+        st.caption(f"**Budget:** {current['budget']}")
         st.caption(current["description"])
     else:
         st.session_state.principal_id = None
@@ -102,6 +103,7 @@ with st.sidebar:
     st.toggle("Parameter-Bound Execution", value=True, disabled=True)
     st.toggle("SQL Interdiction", value=True, disabled=True)
     st.toggle("Per-Caller Entitlement", value=True, disabled=True)
+    st.toggle("Resource Quota (fan-out & rate)", value=True, disabled=True)
 
 st.title("🛡️ IntelligenceStack Control Plane")
 st.markdown("---")

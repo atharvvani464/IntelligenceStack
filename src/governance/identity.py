@@ -43,12 +43,28 @@ class Principal:
     customer_scope: tuple[int, int] | None = None
     # Whether this principal may read the governance audit trail.
     can_view_audit: bool = False
+    # Resource-quota budget -- see `governance/quota.py`. Bounds how much
+    # lakehouse work one request may fan out to, and how many granted calls
+    # this principal may make per rolling minute. `None` means unrestricted on
+    # that dimension, the same convention `customer_scope` uses. Left `None`
+    # for principals whose access is already fully governed by entitlement
+    # (the service identity, the auditor, and any unrecognised caller) so a
+    # budget is never mistaken for the reason a request was refused.
+    max_fanout: int | None = None
+    rate_limit_per_minute: int | None = None
     description: str = ""
 
     # -- function-level entitlement ---------------------------------- #
 
     def may_invoke(self, function_name: str) -> bool:
         return function_name in self.allowed_functions
+
+    # -- resource-quota budget ----------------------------------------- #
+
+    def budget_label(self) -> str:
+        fanout = "unlimited" if self.max_fanout is None else f"{self.max_fanout}/request"
+        rate = "unlimited" if self.rate_limit_per_minute is None else f"{self.rate_limit_per_minute}/min"
+        return f"{fanout} fan-out, {rate} rate"
 
     # -- row-level entitlement --------------------------------------- #
 
@@ -83,6 +99,9 @@ class Principal:
             "allowed_functions": sorted(self.allowed_functions),
             "customer_scope": self.scope_label(),
             "can_view_audit": self.can_view_audit,
+            "max_fanout": self.max_fanout,
+            "rate_limit_per_minute": self.rate_limit_per_minute,
+            "budget": self.budget_label(),
             "description": self.description,
         }
 
@@ -117,7 +136,12 @@ PRINCIPALS: dict[str, Principal] = {
         allowed_functions=_DATA_FUNCTIONS,
         customer_scope=None,
         can_view_audit=True,
-        description="On-call SRE. Full customer coverage and access to the runbooks.",
+        max_fanout=5,
+        rate_limit_per_minute=30,
+        description=(
+            "On-call SRE. Full customer coverage and access to the runbooks, "
+            "budgeted for incident-response fan-out."
+        ),
     ),
     "analyst.chen": Principal(
         principal_id="analyst.chen",
@@ -126,9 +150,13 @@ PRINCIPALS: dict[str, Principal] = {
         allowed_functions=_DATA_FUNCTIONS,
         customer_scope=(400, 419),
         can_view_audit=False,
+        max_fanout=2,
+        rate_limit_per_minute=10,
         description=(
             "Analyst assigned to the CUST_400–CUST_419 book. May use every "
-            "analytical tool, but only against customers in that book."
+            "analytical tool, but only against customers in that book, and "
+            "within a budget sized for interactive lookups rather than bulk "
+            "export."
         ),
     ),
     "auditor.silva": Principal(

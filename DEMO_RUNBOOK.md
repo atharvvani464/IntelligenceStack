@@ -43,7 +43,8 @@ Present deck through **slide 5 ("Five moves, two minutes")**, then alt-tab to th
 | 5 | `What is our vacation policy?` | **"No governed knowledge covers that question"** — retrieval ran, found nothing with enough coverage, declined | "Most RAG demos would confidently cite something irrelevant here. Measured on this corpus, that off-topic question actually *outscores* a legitimate one on similarity — so similarity alone isn't the test." |
 | 6 | `Compare CUST_404 and CUST_417` | **Two** governed calls, one per customer, each cleared separately — then a ranked comparison naming who to fix first | "One question, two independent governance decisions. The boundary isn't a wrapper around a single query — it scales to as many tools as you register." |
 | 7 | *Switch* **Acting as** *→ M. Chen (Analyst), then ask* `Evaluate anomaly parameters for customer CUST_431` | **Refused — ENTITLEMENT.** CUST_431 is outside Chen's CUST_400–419 book. Switch to *A. Okafor (SRE)*, ask the identical question → answered | "Same question, same agent, different person — different and correct answer. That's row-level security enforced at the agent, not just promised at the warehouse. And switch to the auditor: she can see every decision in the Trust Center and no customer data at all." |
-| 8 | *Click the* **🛡️ Trust Center** *tab* | Every decision above already recorded, with the control that ruled on each, plus p50/p95 latency | "You just watched six things happen. They're on the record — including the refusal, which is the best evidence the control is live. And the latency is measured, not claimed." |
+| 8 | *Still as M. Chen, ask* `Compare CUST_404, CUST_405 and CUST_406` | **Refused — RESOURCE_QUOTA.** All three customers are in her book, but three exceeds her budget of two governed calls per request | "Different failure this time — she's entitled to every one of these customers, but the boundary still says no, because entitlement and budget are separate controls. This is what stops one ambitious prompt from becoming an unbudgeted warehouse bill." |
+| 9 | *Click the* **🛡️ Trust Center** *tab* | Every decision above already recorded, with the control that ruled on each, plus p50/p95 latency | "You just watched eight things happen. They're on the record — including the refusals, which are the best evidence the controls are live. And the latency is measured, not claimed." |
 
 **The closer that lands with security people:** while the Trust Center is open, kill the API (`pkill -f "uvicorn src.api.app"`), restart it, and reload. The trail is unchanged. *"That's the difference between logging and evidence."*
 
@@ -74,6 +75,7 @@ curl -s -X POST localhost:8000/api/v1/agent/explore \
 - **"What if the model is jailbroken?"** → The boundary is downstream of the model. A fully compromised model still can't call a function that isn't on the allowlist.
 - **"How hard is production?"** → Repoint `DATABRICKS_HOST` / `DATABRICKS_TOKEN` at a workspace; same call path, same function signature. It's a re-point, not a rewrite.
 - **"Can we see the code?"** → Public repo, runs in four commands. The governance boundary is `src/governance/policy.py`; 10 automated tests cover it.
+- **"What stops an entitled caller from just asking for everything?"** → `src/governance/quota.py`. Entitlement bounds what a caller may touch; the resource quota bounds how much — per-request fan-out and a per-minute call rate, per principal, enforced with a SQL aggregate over the same durable audit trail.
 
 ---
 
