@@ -11,6 +11,7 @@ is worse than a slightly slower one.
 """
 
 import logging
+from datetime import datetime
 
 import duckdb
 
@@ -182,6 +183,25 @@ class AuditEngine:
             [limit],
         ).fetchall()
         return [{"prompt": r[0], "control": r[1], "refusals": r[2]} for r in rows]
+
+    def count_granted_since(self, principal_id: str, since: datetime) -> int:
+        """Granted, executed calls by this principal at or after `since`.
+
+        Backs the RESOURCE_QUOTA rate limit in `governance/quota.py`: a SQL
+        aggregate over the durable trail, so the budget holds across requests
+        -- and across process restarts -- rather than living in one agent
+        instance's memory.
+        """
+        if not self._load():
+            return 0
+        row = self._con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE principal_id = ? AND allowed AND executed AND recorded_at >= ?
+            """,
+            [principal_id, since.isoformat()],
+        ).fetchone()
+        return row[0] or 0
 
     def recent(self, limit: int = 25) -> list[dict]:
         """Most recent decisions, newest first."""
